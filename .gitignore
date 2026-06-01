@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+frontend/dist/
+frontend/node_modules/
+
+backend/project_pulse.db
+backend/project-pulse.config.json
+backend/*.db-shm
+backend/*.db-wal
