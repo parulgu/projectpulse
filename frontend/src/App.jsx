@@ -10,11 +10,50 @@ const actionStatuses = [
 
 const actionStatusRank = { active: 0, blocked: 1, done: 2 };
 
+const decisionStatuses = [
+  { label: "Active", value: "active" },
+  { label: "Revisited", value: "revisited" },
+  { label: "Reversed", value: "reversed" },
+];
+
 const dashboardTabs = [
-  { id: "status", label: "Status by Project" },
-  { id: "people", label: "Status by Person" },
+  { id: "overview", label: "Overview" },
+  { id: "status", label: "Action Board" },
   { id: "notes", label: "Meeting Notes" },
   { id: "bugs", label: "Bug DB" },
+];
+
+const projectRoleFields = [
+  { id: "deliveryManager", label: "Delivery Manager", placeholder: "Name" },
+  { id: "productManager", label: "Product Manager", placeholder: "Name" },
+  { id: "designers", label: "Designers", placeholder: "Names separated by comma" },
+  { id: "developers", label: "Developers", placeholder: "Names separated by comma" },
+  { id: "qaMembers", label: "QA Members", placeholder: "Names separated by comma" },
+];
+
+const fixedProjectRoleIds = new Set(projectRoleFields.map((field) => field.id));
+
+const meetingTemplates = [
+  {
+    id: "standup",
+    label: "Standup",
+    text: "Standup\n\nCompleted:\n- \n\nToday:\n- \n\nBlockers:\n- \n\nNext steps:\n- ",
+  },
+  {
+    id: "weekly",
+    label: "Weekly review",
+    text: "Weekly review\n\nCompleted this week:\n- \n\nPending:\n- \n\nBlocked or at risk:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
+  },
+  {
+    id: "bug-triage",
+    label: "Bug triage",
+    text: "Bug triage\n\nHigh priority bugs:\n- \n\nOwners:\n- \n\nRisks:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
+  },
+  {
+    id: "planning",
+    label: "Planning",
+    text: "Planning meeting\n\nScope:\n- \n\nDependencies:\n- \n\nDecisions:\n- \n\nAction items:\n- ",
+  },
 ];
 
 class DashboardErrorBoundary extends Component {
@@ -87,27 +126,44 @@ function normalizeName(name) {
   return name.trim().replace(/\s+/g, " ");
 }
 
-function parseMembers(value) {
-  const seen = new Set();
-  return value
-    .split(",")
-    .map(normalizeName)
-    .filter((member) => {
-      const key = member.toLowerCase();
-      if (!member || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+function linkHrefFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text)) return text;
+  if (/^[\w.-]+\.[a-z]{2,}(\/\S*)?$/i.test(text)) return `https://${text}`;
+  return "";
 }
 
-function initials(name) {
-  if (!name) return "--";
-  return name
-    .split(" ")
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+function epicLinkFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) return { href: "", label: "" };
+  const keyMatch = text.match(/[A-Z][A-Z0-9]+-\d+/i);
+  const label = keyMatch ? keyMatch[0].toUpperCase() : text;
+  const href = /^https?:\/\//i.test(text)
+    ? text
+    : keyMatch
+      ? `https://jira.oraclecorp.com/jira/browse/${label}`
+      : linkHrefFromText(text);
+  return { href, label };
+}
+
+function projectRoleLabel(roleId) {
+  return projectRoleFields.find((field) => field.id === roleId)?.label ?? roleId;
+}
+
+function customProjectRoleKeys(roleDetails = {}) {
+  return Object.keys(roleDetails).filter((key) => !fixedProjectRoleIds.has(key));
+}
+
+function reorderedIds(items, draggedId, targetId) {
+  const ids = items.map((item) => item.id);
+  const draggedIndex = ids.indexOf(draggedId);
+  const targetIndex = ids.indexOf(targetId);
+  if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) return ids;
+  const nextIds = ids.slice();
+  const [dragged] = nextIds.splice(draggedIndex, 1);
+  nextIds.splice(targetIndex, 0, dragged);
+  return nextIds;
 }
 
 function todayDateInputValue() {
@@ -121,6 +177,100 @@ function formatDisplayDate(value) {
   const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
+function summaryList(label, items = []) {
+  if (!items.length) return "";
+  return `${label}:\n${items.map((item) => `- ${item}`).join("\n")}`;
+}
+
+function projectSummaryText(project, summary) {
+  return [
+    summary.headline || project.name,
+    summary.reportDate ? `Report date: ${formatDisplayDate(summary.reportDate)}` : "",
+    summary.status ? `Overall status: ${summary.status}` : "",
+    "",
+    summaryList("Completed", summary.done),
+    summaryList("Pending", summary.pending),
+    summaryList("Blocked", summary.blocked),
+    summaryList("Risks", summary.risks),
+    summaryList("Key decisions", summary.keyDecisions),
+    summaryList("Customer asks", summary.customerAsks),
+    summaryList("Next steps", summary.nextSteps),
+  ].filter(Boolean).join("\n\n");
+}
+
+function formattedActionTitle(action) {
+  const owner = action.owner ? ` (${action.owner})` : "";
+  const due = action.completionDate ? `, due ${formatDisplayDate(action.completionDate)}` : "";
+  return `${action.title}${owner}${due}`;
+}
+
+function timestampForSort(value) {
+  if (!value) return 0;
+  const normalized = String(value).includes("T") ? String(value) : `${String(value).slice(0, 10)}T00:00:00`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function actionStatusLabel(value) {
+  return actionStatuses.find((status) => status.value === value)?.label ?? labelForClassification(value || "active");
+}
+
+function projectMemoryItems({ actions = [], decisions = [], updates = [] }) {
+  const noteItems = updates.map((update) => ({
+    date: update.meetingDate || update.createdAt,
+    id: `note-${update.id}`,
+    meta: update.meetingDate ? `Meeting · ${formatDisplayDate(update.meetingDate)}` : "Project note",
+    text: update.text,
+    tone: "note",
+    type: "Note",
+  }));
+
+  const decisionItems = decisions.map((decision) => ({
+    date: decision.decisionDate || decision.createdAt,
+    id: `decision-${decision.id}`,
+    meta: [decision.owner || "Unassigned", labelForClassification(decision.status || "active")].join(" · "),
+    text: decision.text,
+    tone: "decision",
+    type: "Decision",
+  }));
+
+  const actionItems = actions.map((action) => ({
+    date: action.createdAt,
+    id: `action-${action.id}`,
+    meta: [
+      actionStatusLabel(action.status),
+      action.owner || "Unassigned",
+      action.completionDate ? `Due ${formatDisplayDate(action.completionDate)}` : "",
+    ].filter(Boolean).join(" · "),
+    text: action.title,
+    tone: action.status === "blocked" ? "blocked" : action.status === "done" ? "done" : "action",
+    type: "Action",
+  }));
+
+  return [...noteItems, ...decisionItems, ...actionItems]
+    .sort((left, right) => timestampForSort(right.date) - timestampForSort(left.date));
+}
+
+function normalizeTopic(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\b(the|and|for|with|from|that|this|need|needs|should|will|has|have|todo|action|next|steps)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 6)
+    .join(" ");
+}
+
+function followUpFlagLabel(flag) {
+  return String(flag || "")
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
 }
 
 function parseDateOnly(value) {
@@ -145,6 +295,72 @@ function dueDateDetails(action) {
   if (daysUntilDue === 1) return { label: "Due tomorrow", tone: "soon" };
   if (daysUntilDue <= 7) return { label: `Due in ${daysUntilDue}d`, tone: "soon" };
   return { label: `Due ${formatDisplayDate(action.completionDate)}`, tone: "later" };
+}
+
+function actionMatchesDueFilter(action, dueFilter) {
+  if (dueFilter === "all") return true;
+  const details = dueDateDetails(action);
+  if (!details || action.status === "done") return false;
+  if (dueFilter === "overdue") return details.tone === "overdue";
+  if (dueFilter === "today") return details.tone === "today";
+  if (dueFilter === "week") return ["overdue", "today", "soon"].includes(details.tone);
+  return true;
+}
+
+function actionMatchesMeetingRange(action, meetingStartDate, meetingEndDate) {
+  if (!meetingStartDate && !meetingEndDate) return true;
+  if (!action.meetingDate) return false;
+  const meetingTime = parseDateOnly(action.meetingDate)?.getTime();
+  if (!Number.isFinite(meetingTime)) return false;
+  const startTime = meetingStartDate ? parseDateOnly(meetingStartDate)?.getTime() : null;
+  const endTime = meetingEndDate ? parseDateOnly(meetingEndDate)?.getTime() : null;
+  if (Number.isFinite(startTime) && meetingTime < startTime) return false;
+  if (Number.isFinite(endTime) && meetingTime > endTime) return false;
+  return true;
+}
+
+function actionAgeLabel(action) {
+  if (!action?.createdAt || action.status === "done") return "";
+  const created = new Date(action.createdAt);
+  if (Number.isNaN(created.getTime())) return "";
+  const today = new Date();
+  const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const createdOnly = new Date(created.getFullYear(), created.getMonth(), created.getDate());
+  const daysOpen = Math.max(0, Math.round((todayOnly.getTime() - createdOnly.getTime()) / 86400000));
+  if (daysOpen === 0) return "Opened today";
+  if (daysOpen === 1) return "Open 1 day";
+  return `Open ${daysOpen} days`;
+}
+
+function projectHealth(actions, updates) {
+  const overdueCount = actions.filter((action) => dueDateDetails(action)?.tone === "overdue").length;
+  const blockedCount = actions.filter((action) => action.status === "blocked").length;
+  const unassignedCount = actions.filter((action) => action.status !== "done" && !action.owner).length;
+  const latestUpdateTime = updates
+    .map((update) => new Date(update.meetingDate || update.createdAt || 0).getTime())
+    .filter((time) => Number.isFinite(time))
+    .sort((left, right) => right - left)[0];
+  const daysSinceUpdate = latestUpdateTime
+    ? Math.floor((Date.now() - latestUpdateTime) / (24 * 60 * 60 * 1000))
+    : null;
+  const staleNotes = !latestUpdateTime || daysSinceUpdate > 7;
+  const reasons = [];
+  if (blockedCount) reasons.push(`${blockedCount} blocked`);
+  if (overdueCount) reasons.push(`${overdueCount} overdue`);
+  if (unassignedCount) reasons.push(`${unassignedCount} unassigned`);
+  if (staleNotes) reasons.push(latestUpdateTime ? `No update in ${daysSinceUpdate} days` : "No updates yet");
+
+  if (blockedCount > 0 || overdueCount > 0) {
+    return { label: "Red", tone: "red", reason: reasons.slice(0, 2).join(" · ") };
+  }
+  if (staleNotes || unassignedCount > 0) {
+    return {
+      label: "Yellow",
+      tone: "yellow",
+      reason: reasons.slice(0, 2).join(" · "),
+    };
+  }
+  return { label: "Green", tone: "green", reason: "On track" };
 }
 
 function compareActionsByDueDateAndStatus(a, b) {
@@ -183,16 +399,6 @@ function dedupeActionsForDisplay(actions) {
   return deduped;
 }
 
-function includesFilter(value, filter) {
-  return String(value ?? "").toLowerCase().includes(filter.trim().toLowerCase());
-}
-
-function actionMeetingDates(actions) {
-  return Array.from(new Set(actions.map((action) => action.meetingDate).filter(Boolean))).sort((a, b) =>
-    String(b).localeCompare(String(a)),
-  );
-}
-
 function ActionMeetingTag({ action }) {
   if (!action.meetingDate) return null;
   return <span className="meta-pill meeting">Meeting {formatDisplayDate(action.meetingDate)}</span>;
@@ -202,11 +408,48 @@ function makeDraftActionId() {
   return `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-const preferredBugReportColumns = ["rptno", "subject", "status", "severity", "product_id", "raw_updated_date", "reported_by", "component", "assignee"];
+function makeDraftMemoryId() {
+  return `memory-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function draftActionKey(action) {
+  return [
+    normalizeName(action.title).toLowerCase(),
+    normalizeName(action.owner).toLowerCase(),
+    action.completionDate || "",
+  ].join("|");
+}
+
+function dedupeDraftActions(actions) {
+  const seen = new Set();
+  const deduped = [];
+  actions.forEach((action) => {
+    const key = draftActionKey(action);
+    if (!normalizeName(action.title) || seen.has(key)) return;
+    seen.add(key);
+    deduped.push(action);
+  });
+  return deduped;
+}
+
+const preferredBugReportColumns = [
+  "rptno",
+  "subject",
+  "assignee",
+  "status",
+  "severity",
+  "reported_by",
+  "raw_updated_date",
+  "product_id",
+  "component",
+  "bt_tags",
+];
 const bugColumnAliases = {
   "Bug/Enh Number": "rptno",
   RPTNO: "rptno",
   Assignee: "assignee",
+  Tag: "bt_tags",
+  Tags: "bt_tags",
   Priority: "priority",
   Severity: "severity",
   Status: "status",
@@ -220,6 +463,8 @@ const emptyBugQuery = {
   rptno: "",
   severity: "",
   status: "",
+  subject: "",
+  tag: "",
 };
 
 function bugQueryHasValue(query) {
@@ -241,6 +486,7 @@ function bugFieldValue(bug, column) {
     priority: bug.priority,
     Assignee: bug.assignee,
     assignee: bug.assignee,
+    bt_tags: fields.bt_tags ?? fields.Tag ?? fields.Tags,
     product_id: fields.product_id,
     reported_by: fields.reported_by,
     component: fields.component,
@@ -257,9 +503,11 @@ function bugColumnLabel(column) {
   const labels = {
     "Bug/Enh Number": "Bug No",
     rptno: "Bug No",
-    product_id: "Product ID",
+    product_id: "Product Id",
     raw_updated_date: "Reported Date",
     reported_by: "Reported By",
+    subject: "Subject",
+    bt_tags: "Tag",
   };
   return labels[column] ?? column;
 }
@@ -287,6 +535,14 @@ function orderedBugColumns(bugs) {
 function defaultBugColumns(availableColumns) {
   const preferred = preferredBugReportColumns.filter((column) => availableColumns.includes(column));
   const remaining = availableColumns.filter((column) => !preferred.includes(column));
+  return [...preferred, ...remaining];
+}
+
+function orderBugColumnsForReport(columns, availableColumns) {
+  const availableSet = new Set(availableColumns);
+  const selectedSet = new Set(columns.filter((column) => availableSet.has(column)));
+  const preferred = preferredBugReportColumns.filter((column) => selectedSet.has(column));
+  const remaining = columns.filter((column) => selectedSet.has(column) && !preferred.includes(column));
   return [...preferred, ...remaining];
 }
 
@@ -332,6 +588,29 @@ function TrashIcon() {
       <path d="M6 7l1 14h10l1-14" />
       <path d="M10 11v6" />
       <path d="M14 11v6" />
+    </svg>
+  );
+}
+
+function ArchiveIcon() {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 7h16" />
+      <path d="M6 7v13h12V7" />
+      <path d="M9 11h6" />
+      <path d="M3 4h18v3H3z" />
+    </svg>
+  );
+}
+
+function RestoreIcon() {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 7h16" />
+      <path d="M6 7v13h12V7" />
+      <path d="M12 16V10" />
+      <path d="M9 13l3-3 3 3" />
+      <path d="M3 4h18v3H3z" />
     </svg>
   );
 }
@@ -431,6 +710,96 @@ function SearchIcon() {
   );
 }
 
+function ChatIcon() {
+  return (
+    <svg className="icon bot-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="2.5" y="6.5" width="19" height="14" rx="5" />
+      <path d="M12 3.5v3" />
+      <path d="M8.5 12.5h.01" />
+      <path d="M15.5 12.5h.01" />
+      <path d="M8.75 16.5h6.5" />
+    </svg>
+  );
+}
+
+function TooltipLayer() {
+  const [tooltip, setTooltip] = useState(null);
+
+  useEffect(() => {
+    const tooltipSelector = [
+      "[data-tooltip]",
+      "button[title]",
+      "label[title]",
+      ".icon-action-button[aria-label]",
+      ".project-action-button[aria-label]",
+      ".bug-query-icon-button[aria-label]",
+      ".bug-upload-button[aria-label]",
+      ".compact-icon-button[aria-label]",
+      ".project-ask-button[aria-label]",
+    ].join(",");
+
+    function textForTooltip(target) {
+      if (!target) return "";
+      return (
+        target.getAttribute("data-tooltip") ||
+        target.getAttribute("title") ||
+        target.getAttribute("aria-label") ||
+        ""
+      ).trim();
+    }
+
+    function showTooltip(event) {
+      const target = event.target.closest(tooltipSelector);
+      const text = textForTooltip(target);
+      if (!target || !text) return;
+
+      const rect = target.getBoundingClientRect();
+      const placement = rect.bottom + 10 > window.innerHeight - 44 ? "top" : "bottom";
+      const top = placement === "top" ? rect.top - 10 : rect.bottom + 10;
+      const left = Math.min(Math.max(rect.left + rect.width / 2, 96), window.innerWidth - 96);
+
+      setTooltip({ left, placement, text, top });
+    }
+
+    function hideTooltip(event) {
+      if (event?.type === "mouseout") {
+        const currentTarget = event.target.closest?.(tooltipSelector);
+        const nextTarget = event.relatedTarget?.closest?.(tooltipSelector);
+        if (currentTarget && currentTarget === nextTarget) return;
+      }
+      setTooltip(null);
+    }
+
+    document.addEventListener("mouseover", showTooltip);
+    document.addEventListener("focusin", showTooltip);
+    document.addEventListener("mouseout", hideTooltip);
+    document.addEventListener("focusout", hideTooltip);
+    document.addEventListener("click", hideTooltip);
+    document.addEventListener("keydown", hideTooltip);
+    window.addEventListener("resize", hideTooltip);
+    window.addEventListener("scroll", hideTooltip, true);
+
+    return () => {
+      document.removeEventListener("mouseover", showTooltip);
+      document.removeEventListener("focusin", showTooltip);
+      document.removeEventListener("mouseout", hideTooltip);
+      document.removeEventListener("focusout", hideTooltip);
+      document.removeEventListener("click", hideTooltip);
+      document.removeEventListener("keydown", hideTooltip);
+      window.removeEventListener("resize", hideTooltip);
+      window.removeEventListener("scroll", hideTooltip, true);
+    };
+  }, []);
+
+  if (!tooltip) return null;
+
+  return (
+    <div className={`ui-tooltip ${tooltip.placement}`} role="tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
+      {tooltip.text}
+    </div>
+  );
+}
+
 function MoreIcon() {
   return (
     <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -444,7 +813,8 @@ function MoreIcon() {
 function NewProjectForm({ onCancel, onCreateProject }) {
   const [projectName, setProjectName] = useState("");
   const [classification, setClassification] = useState("");
-  const [members, setMembers] = useState("");
+  const [epic, setEpic] = useState("");
+  const [targetRelease, setTargetRelease] = useState("");
   const [error, setError] = useState("");
 
   async function handleSubmit(event) {
@@ -455,10 +825,11 @@ function NewProjectForm({ onCancel, onCreateProject }) {
     }
 
     try {
-      await onCreateProject({ classification, members, name: projectName });
+      await onCreateProject({ classification, epic, name: projectName, targetRelease });
       setProjectName("");
       setClassification("");
-      setMembers("");
+      setEpic("");
+      setTargetRelease("");
       setError("");
       onCancel();
     } catch (error) {
@@ -487,11 +858,20 @@ function NewProjectForm({ onCancel, onCreateProject }) {
       </label>
 
       <label>
-        <span>Members</span>
+        <span>EPIC</span>
         <input
-          onChange={(event) => setMembers(event.target.value)}
-          placeholder="AA, Priya"
-          value={members}
+          onChange={(event) => setEpic(event.target.value)}
+          placeholder="EPIC-123"
+          value={epic}
+        />
+      </label>
+
+      <label>
+        <span>Target release</span>
+        <input
+          onChange={(event) => setTargetRelease(event.target.value)}
+          placeholder="25D"
+          value={targetRelease}
         />
       </label>
 
@@ -511,14 +891,20 @@ function NewProjectForm({ onCancel, onCreateProject }) {
 
 function Sidebar({
   classificationGroups,
+  isAllProjectsSelected,
   isCollapsed,
   openClassifications,
   selectedProject,
+  onAllProjectsSelect,
   onCreateProject,
+  onArchiveProject,
   onProjectSelect,
   onRequestDeleteProject,
+  onRestoreProject,
+  onToggleArchivedProjects,
   onToggleSidebar,
   onToggleClassification,
+  showArchivedProjects,
 }) {
   const [isCreatingProject, setIsCreatingProject] = useState(false);
 
@@ -565,6 +951,22 @@ function Sidebar({
           ) : null}
 
           <section className="sidebar-switcher" aria-label="Project navigator">
+            <button
+              aria-current={isAllProjectsSelected ? "page" : undefined}
+              className={`all-projects-button ${isAllProjectsSelected ? "active" : ""}`}
+              onClick={onAllProjectsSelect}
+              type="button"
+            >
+              All Projects
+            </button>
+            <label className="sidebar-archive-toggle">
+              <input
+                checked={showArchivedProjects}
+                onChange={(event) => onToggleArchivedProjects(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Show archived</span>
+            </label>
             <div className="project-tree">
               {classificationGroups.length ? classificationGroups.map((group) => {
                 const isOpen = openClassifications.includes(group.classification);
@@ -590,16 +992,38 @@ function Sidebar({
                           >
                             <button
                               aria-current={project.id === selectedProject?.id ? "page" : undefined}
-                              className={`project-nav-item ${project.id === selectedProject?.id ? "active" : ""}`}
+                              className={`project-nav-item ${project.id === selectedProject?.id ? "active" : ""} ${project.archivedAt ? "archived" : ""}`}
                               onClick={() => onProjectSelect(project)}
                               type="button"
                             >
                               {project.name}
                             </button>
+                            {project.archivedAt ? (
+                              <button
+                                aria-label={`Restore ${project.name}`}
+                                className="project-action-button restore"
+                                onClick={() => onRestoreProject(project)}
+                                title="Restore project"
+                                type="button"
+                              >
+                                <RestoreIcon />
+                              </button>
+                            ) : (
+                              <button
+                                aria-label={`Archive ${project.name}`}
+                                className="project-action-button archive"
+                                onClick={() => onArchiveProject(project)}
+                                title="Archive project"
+                                type="button"
+                              >
+                                <ArchiveIcon />
+                              </button>
+                            )}
                             <button
                               aria-label={`Delete ${project.name}`}
-                              className="project-delete-button"
+                              className="project-action-button delete"
                               onClick={() => onRequestDeleteProject(project)}
+                              title="Delete project"
                               type="button"
                             >
                               <TrashIcon />
@@ -621,32 +1045,30 @@ function Sidebar({
 
 function ProjectSummary({
   actions,
-  hasProjectNotes,
+  hasSummarySource,
   isSummarizingProject,
   metrics,
+  onOpenProjectAsk,
   onSummarizeProject,
-  onUpdateMembers,
+  onUpdateProjectDetails,
   selectedProject,
+  updates,
 }) {
-  const [isEditingMembers, setIsEditingMembers] = useState(false);
-  const [memberError, setMemberError] = useState("");
-  const [membersValue, setMembersValue] = useState(selectedProject.members.join(", "));
   const [summaryError, setSummaryError] = useState("");
-  const nextMembers = parseMembers(membersValue);
-  const affectedOwners = [
-    ...new Set(
-      actions
-        .map((action) => action.owner)
-        .filter((owner) => owner && !nextMembers.includes(owner)),
-    ),
-  ];
+  const [isEditingProjectMeta, setIsEditingProjectMeta] = useState(false);
+  const [classification, setClassification] = useState(selectedProject.classification ?? "");
+  const [epic, setEpic] = useState(selectedProject.epic ?? "");
+  const [targetRelease, setTargetRelease] = useState(selectedProject.targetRelease ?? "");
+  const health = projectHealth(actions, updates);
+  const epicLink = epicLinkFromText(selectedProject.epic);
 
   useEffect(() => {
-    setIsEditingMembers(false);
-    setMemberError("");
     setSummaryError("");
-    setMembersValue(selectedProject.members.join(", "));
-  }, [selectedProject.id, selectedProject.members]);
+    setIsEditingProjectMeta(false);
+    setClassification(selectedProject.classification ?? "");
+    setEpic(selectedProject.epic ?? "");
+    setTargetRelease(selectedProject.targetRelease ?? "");
+  }, [selectedProject.classification, selectedProject.epic, selectedProject.id, selectedProject.targetRelease]);
 
   async function handleSummaryRequest() {
     try {
@@ -657,15 +1079,27 @@ function ProjectSummary({
     }
   }
 
-  async function handleMembersSubmit(event) {
+  async function handleProjectMetaSubmit(event) {
     event.preventDefault();
     try {
-      await onUpdateMembers(membersValue);
-      setIsEditingMembers(false);
-      setMemberError("");
+      setSummaryError("");
+      await onUpdateProjectDetails({
+        classification,
+        epic,
+        targetRelease,
+      });
+      setIsEditingProjectMeta(false);
     } catch (error) {
-      setMemberError(error instanceof Error ? error.message : "Could not update members.");
+      setSummaryError(error instanceof Error ? error.message : "Could not update project details.");
     }
+  }
+
+  function cancelProjectMetaEdit() {
+    setClassification(selectedProject.classification ?? "");
+    setEpic(selectedProject.epic ?? "");
+    setTargetRelease(selectedProject.targetRelease ?? "");
+    setIsEditingProjectMeta(false);
+    setSummaryError("");
   }
 
   return (
@@ -673,21 +1107,63 @@ function ProjectSummary({
       <div className="project-context-main">
         <div className="project-title-group">
           <h2>{selectedProject.name}</h2>
-          <div className="project-meta-line">
-            <span>{labelForClassification(selectedProject.classification)}</span>
-            <span>{selectedProject.members.length} {selectedProject.members.length === 1 ? "member" : "members"}</span>
-            <button
-              aria-label="Edit project members"
-              className="member-edit-button"
-              onClick={() => setIsEditingMembers((isEditing) => !isEditing)}
-              type="button"
-            >
-              <EditIcon />
-            </button>
-          </div>
+          {isEditingProjectMeta ? (
+            <form className="project-meta-edit" onSubmit={handleProjectMetaSubmit}>
+              <label>
+                <span>Classification</span>
+                <input onChange={(event) => setClassification(event.target.value)} value={classification} />
+              </label>
+              <label>
+                <span>EPIC</span>
+                <input onChange={(event) => setEpic(event.target.value)} placeholder="EPIC-123" value={epic} />
+              </label>
+              <label>
+                <span>Target release</span>
+                <input onChange={(event) => setTargetRelease(event.target.value)} placeholder="25D" value={targetRelease} />
+              </label>
+              <button aria-label="Save project header" className="icon-action-button confirm" title="Save" type="submit">
+                <CheckIcon />
+              </button>
+              <button aria-label="Cancel project header edit" className="icon-action-button" onClick={cancelProjectMetaEdit} title="Cancel" type="button">
+                <XIcon />
+              </button>
+            </form>
+          ) : (
+            <div className="project-meta-line">
+              <span>{labelForClassification(selectedProject.classification)}</span>
+              <span>{selectedProject.members.length} {selectedProject.members.length === 1 ? "person" : "people"}</span>
+              {selectedProject.epic ? (
+                <span>
+                  {epicLink.href ? (
+                    <a className="project-meta-link" href={epicLink.href} rel="noreferrer" target="_blank">
+                      {epicLink.label}
+                    </a>
+                  ) : epicLink.label}
+                </span>
+              ) : null}
+              <span>{selectedProject.targetRelease || "Not set"}</span>
+              <button
+                aria-label="Edit project header"
+                className="meta-edit-button"
+                onClick={() => setIsEditingProjectMeta(true)}
+                title="Edit project details"
+                type="button"
+              >
+                <EditIcon />
+              </button>
+            </div>
+          )}
         </div>
         <div className="project-summary-tools">
           <div className="metric-pills" aria-label="Project action summary">
+            <span
+              aria-label={`Project health: ${health.label}. ${health.reason}`}
+              className={`health-pill ${health.tone}`}
+              title={health.reason}
+            >
+              <span>{health.label}</span>
+              <strong>{health.reason}</strong>
+            </span>
             {metrics.map((metric) => (
               <span
                 aria-label={`${metric.label}: ${metric.value}`}
@@ -701,55 +1177,829 @@ function ProjectSummary({
             ))}
           </div>
           <button
-            className="secondary-action quiet"
-            disabled={isSummarizingProject || !hasProjectNotes}
+            className="primary-action"
+            disabled={isSummarizingProject || !hasSummarySource}
             onClick={handleSummaryRequest}
-            title={hasProjectNotes ? "Summarize project notes" : "Add meeting notes before summarizing"}
+            title={hasSummarySource ? "Create Pulse Report" : "Add project data before creating a Pulse Report"}
             type="button"
           >
-            {isSummarizingProject ? "Summarizing" : "Summary"}
+            {isSummarizingProject ? "Creating" : "Pulse Report"}
+          </button>
+          <button
+            aria-label="Ask Project Pulse"
+            className="primary-action project-ask-button"
+            onClick={() => onOpenProjectAsk(selectedProject)}
+            title="Ask Project Pulse about this project"
+            type="button"
+          >
+            <ChatIcon />
           </button>
         </div>
       </div>
       {summaryError ? <p className="form-error light">{summaryError}</p> : null}
+    </section>
+  );
+}
 
-      {isEditingMembers ? (
-        <form className="member-edit-form" onSubmit={handleMembersSubmit}>
-          <label>
-            Members
-            <input
-              onChange={(event) => setMembersValue(event.target.value)}
-              placeholder="AA, Priya, Ben"
-              value={membersValue}
-            />
-          </label>
-          {affectedOwners.length ? (
-            <p className="member-warning" role="status">
-              Actions owned by {affectedOwners.join(", ")} will become unassigned.
-            </p>
-          ) : null}
-          {memberError ? <p className="form-error light">{memberError}</p> : null}
-          <div className="icon-form-actions">
-            <button aria-label="Save members" className="icon-action-button confirm" title="Save" type="submit">
-              <CheckIcon />
-            </button>
+function ProjectOverview({
+  actions,
+  decisions,
+  onCreatePhase,
+  onCreatePhaseItem,
+  onCreateProjectLink,
+  onDeletePhase,
+  onDeletePhaseItem,
+  onDeleteProjectLink,
+  onMovePhase,
+  onMovePhaseItem,
+  onReorderPhaseItems,
+  onReorderPhases,
+  onUpdatePhase,
+  onUpdatePhaseItem,
+  onUpdateProjectDetails,
+  onUpdateProjectLink,
+  phases,
+  project,
+  projectLinks,
+  updates,
+}) {
+  const [expandedPhaseId, setExpandedPhaseId] = useState(null);
+  const [isPhaseTrackerCollapsed, setIsPhaseTrackerCollapsed] = useState(true);
+  const [isEditingDetails, setIsEditingDetails] = useState(false);
+  const [roleValues, setRoleValues] = useState({ ...(project.roleDetails ?? {}) });
+  const [isAddingRole, setIsAddingRole] = useState(false);
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRolePeople, setNewRolePeople] = useState("");
+  const [editingPhaseId, setEditingPhaseId] = useState(null);
+  const [phaseName, setPhaseName] = useState("");
+  const [phaseMilestone, setPhaseMilestone] = useState("");
+  const [isPhaseDialogOpen, setIsPhaseDialogOpen] = useState(false);
+  const [newPhaseName, setNewPhaseName] = useState("");
+  const [newPhaseItems, setNewPhaseItems] = useState("");
+  const [isItemDialogOpen, setIsItemDialogOpen] = useState(false);
+  const [newItemPhaseId, setNewItemPhaseId] = useState("");
+  const [editingItemId, setEditingItemId] = useState(null);
+  const [itemTitle, setItemTitle] = useState("");
+  const [newItemTitle, setNewItemTitle] = useState("");
+  const [editingLinkId, setEditingLinkId] = useState(null);
+  const [isAddingLink, setIsAddingLink] = useState(false);
+  const [linkName, setLinkName] = useState("");
+  const [linkAddress, setLinkAddress] = useState("");
+  const [linkText, setLinkText] = useState("");
+  const [draggedPhaseId, setDraggedPhaseId] = useState(null);
+  const [dragOverPhaseId, setDragOverPhaseId] = useState(null);
+  const [draggedItemId, setDraggedItemId] = useState(null);
+  const [dragOverItemId, setDragOverItemId] = useState(null);
+  const [overviewError, setOverviewError] = useState("");
+
+  const expandedPhase = expandedPhaseId === null ? null : phases.find((phase) => phase.id === expandedPhaseId) ?? phases[0] ?? null;
+  const completePhaseCount = phases.filter((phase) => phase.status === "done").length;
+  const totalSubtypeCount = phases.reduce((total, phase) => total + phase.items.length, 0);
+  const completeSubtypeCount = phases.reduce(
+    (total, phase) => total + phase.items.filter((item) => item.completed).length,
+    0,
+  );
+  const overallProgress = totalSubtypeCount ? Math.round((completeSubtypeCount / totalSubtypeCount) * 100) : 0;
+  const nextPhase = phases.find((phase) => phase.status !== "done") ?? null;
+  const nextSubtype = nextPhase?.items.find((item) => !item.completed) ?? null;
+  const projectRoleDetailsKey = JSON.stringify(project.roleDetails ?? {});
+
+  useEffect(() => {
+    setExpandedPhaseId(null);
+    setIsPhaseTrackerCollapsed(true);
+    setIsEditingDetails(false);
+    setRoleValues({ ...(project.roleDetails ?? {}) });
+    setIsAddingRole(false);
+    setNewRoleName("");
+    setNewRolePeople("");
+    setEditingPhaseId(null);
+    setEditingItemId(null);
+    setEditingLinkId(null);
+    setIsAddingLink(false);
+    setLinkName("");
+    setLinkAddress("");
+    setLinkText("");
+    setIsPhaseDialogOpen(false);
+    setIsItemDialogOpen(false);
+    setDraggedPhaseId(null);
+    setDragOverPhaseId(null);
+    setDraggedItemId(null);
+    setDragOverItemId(null);
+    setOverviewError("");
+  }, [project.id]);
+
+  useEffect(() => {
+    if (isEditingDetails || isAddingRole) return;
+    setRoleValues({ ...(project.roleDetails ?? {}) });
+  }, [isAddingRole, isEditingDetails, projectRoleDetailsKey]);
+
+  useEffect(() => {
+    if (expandedPhaseId === null) return;
+    if (expandedPhaseId && phases.some((phase) => phase.id === expandedPhaseId)) return;
+    setExpandedPhaseId(phases.find((phase) => phase.status !== "done")?.id ?? phases[0]?.id ?? null);
+  }, [expandedPhaseId, phases]);
+
+  async function handleProjectDetailsSubmit(event) {
+    event.preventDefault();
+    try {
+      setOverviewError("");
+      await onUpdateProjectDetails({ roleDetails: roleValues });
+      setIsEditingDetails(false);
+      setIsAddingRole(false);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not update project details.");
+    }
+  }
+
+  async function handleAddProjectRole(event) {
+    event.preventDefault();
+    const roleName = normalizeName(newRoleName);
+    const rolePeople = normalizeName(newRolePeople);
+    if (!roleName || !rolePeople) return;
+    const duplicateRole = Object.keys(roleValues).some((roleId) => projectRoleLabel(roleId).toLowerCase() === roleName.toLowerCase());
+    if (duplicateRole) {
+      setOverviewError("That role already exists.");
+      return;
+    }
+    const nextRoleValues = { ...roleValues, [roleName]: rolePeople };
+    try {
+      setOverviewError("");
+      await onUpdateProjectDetails({ roleDetails: nextRoleValues });
+      setRoleValues(nextRoleValues);
+      setNewRoleName("");
+      setNewRolePeople("");
+      setIsAddingRole(false);
+      setIsEditingDetails(false);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not add project role.");
+    }
+  }
+
+  function handleRemoveProjectRole(roleId) {
+    setRoleValues((currentRoles) => {
+      const nextRoles = { ...currentRoles };
+      delete nextRoles[roleId];
+      return nextRoles;
+    });
+  }
+
+  function cancelProjectTeamEdit() {
+    setIsEditingDetails(false);
+    setRoleValues({ ...(project.roleDetails ?? {}) });
+    setIsAddingRole(false);
+    setNewRoleName("");
+    setNewRolePeople("");
+    setOverviewError("");
+  }
+
+  async function handleAddPhase(event) {
+    event.preventDefault();
+    if (!newPhaseName.trim()) return;
+    try {
+      const phase = await onCreatePhase(project.id, {
+        items: newPhaseItems.split("\n").map(normalizeName).filter(Boolean),
+        name: newPhaseName,
+      });
+      setExpandedPhaseId(phase.id);
+      setIsPhaseTrackerCollapsed(false);
+      setIsPhaseDialogOpen(false);
+      setNewPhaseName("");
+      setNewPhaseItems("");
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not add phase.");
+    }
+  }
+
+  async function handlePhaseEdit(event) {
+    event.preventDefault();
+    if (!editingPhaseId || !phaseName.trim()) return;
+    try {
+      await onUpdatePhase(editingPhaseId, { milestone: phaseMilestone, name: phaseName });
+      setEditingPhaseId(null);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not update phase.");
+    }
+  }
+
+  async function handleAddItem(event) {
+    event.preventDefault();
+    const targetPhaseId = Number(newItemPhaseId || expandedPhase?.id || phases[0]?.id || 0);
+    if (!targetPhaseId || !newItemTitle.trim()) return;
+    try {
+      await onCreatePhaseItem(targetPhaseId, { title: newItemTitle });
+      setExpandedPhaseId(targetPhaseId);
+      setIsPhaseTrackerCollapsed(false);
+      setNewItemTitle("");
+      setNewItemPhaseId("");
+      setIsItemDialogOpen(false);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not add subtype.");
+    }
+  }
+
+  async function handleItemEdit(event) {
+    event.preventDefault();
+    if (!editingItemId || !itemTitle.trim()) return;
+    try {
+      await onUpdatePhaseItem(editingItemId, { title: itemTitle });
+      setEditingItemId(null);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not update subtype.");
+    }
+  }
+
+  async function handleAddLink(event) {
+    event.preventDefault();
+    if (!linkName.trim() || !linkAddress.trim() || !linkText.trim()) return;
+    try {
+      await onCreateProjectLink(project.id, { address: linkAddress, linkText, name: linkName });
+      closeLinkDialog();
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not add useful link.");
+    }
+  }
+
+  async function handleLinkEdit(event) {
+    event.preventDefault();
+    if (!editingLinkId || !linkName.trim() || !linkAddress.trim() || !linkText.trim()) return;
+    try {
+      await onUpdateProjectLink(editingLinkId, { address: linkAddress, linkText, name: linkName });
+      closeLinkDialog();
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not update useful link.");
+    }
+  }
+
+  function beginPhaseEdit(phase) {
+    setEditingPhaseId(phase.id);
+    setPhaseName(phase.name);
+    setPhaseMilestone(phase.milestone);
+  }
+
+  function beginItemEdit(item) {
+    setEditingItemId(item.id);
+    setItemTitle(item.title);
+  }
+
+  function beginLinkEdit(link) {
+    setEditingLinkId(link.id);
+    setIsAddingLink(false);
+    setLinkName(link.name);
+    setLinkAddress(link.address ?? "");
+    setLinkText(link.linkText ?? "");
+  }
+
+  function beginLinkAdd() {
+    setIsAddingLink(true);
+    setEditingLinkId(null);
+    setLinkName("");
+    setLinkAddress("");
+    setLinkText("");
+  }
+
+  function closeLinkDialog() {
+    setIsAddingLink(false);
+    setEditingLinkId(null);
+    setLinkName("");
+    setLinkAddress("");
+    setLinkText("");
+  }
+
+  return (
+    <div className="project-overview">
+      {overviewError ? <p className="form-error light">{overviewError}</p> : null}
+
+      <div className="overview-top-grid">
+        <section className="overview-section">
+          <div className="overview-section-heading compact">
+            <div>
+              <h2>Project team</h2>
+              <p>Role names become the project owner list.</p>
+            </div>
+            <div className="section-heading-actions">
+              <button
+                aria-expanded={isAddingRole}
+                aria-label="Add project role"
+                className="icon-action-button confirm"
+                onClick={() => {
+                  setIsAddingRole((isAdding) => !isAdding);
+                  setIsEditingDetails(true);
+                }}
+                title="Add project role"
+                type="button"
+              >
+                <PlusIcon />
+              </button>
+              <button
+                className="secondary-action quiet compact"
+                onClick={() => {
+                  if (isEditingDetails) {
+                    cancelProjectTeamEdit();
+                    return;
+                  }
+                  setIsEditingDetails(true);
+                  setIsAddingRole(false);
+                  setRoleValues({ ...(project.roleDetails ?? {}) });
+                }}
+                type="button"
+              >
+                {isEditingDetails ? "Cancel" : "Edit"}
+              </button>
+            </div>
+          </div>
+
+          {isEditingDetails ? (
+            <form className="overview-table editable role-table" onSubmit={handleProjectDetailsSubmit}>
+              <div className="overview-table-head">
+                <span>Role</span>
+                <span>Details</span>
+                <span />
+              </div>
+              {projectRoleFields.map((field) => (
+                <label className="overview-table-row" key={field.id}>
+                  <strong>{field.label}</strong>
+                  <input
+                    onChange={(event) => setRoleValues((current) => ({ ...current, [field.id]: event.target.value }))}
+                    placeholder={field.placeholder}
+                    value={roleValues?.[field.id] ?? ""}
+                  />
+                  <span />
+                </label>
+              ))}
+              {customProjectRoleKeys(roleValues).map((roleId) => (
+                <div className="overview-table-row custom-role-row" key={roleId}>
+                  <strong>{roleId}</strong>
+                  <input
+                    onChange={(event) => setRoleValues((current) => ({ ...current, [roleId]: event.target.value }))}
+                    placeholder="Names separated by comma"
+                    value={roleValues?.[roleId] ?? ""}
+                  />
+                  <button
+                    aria-label={`Remove ${roleId} role`}
+                    className="icon-action-button danger"
+                    onClick={() => handleRemoveProjectRole(roleId)}
+                    title="Remove role"
+                    type="button"
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              ))}
+              {isAddingRole ? (
+                <div className="overview-table-row add role-add-row">
+                  <input onChange={(event) => setNewRoleName(event.target.value)} placeholder="Role" value={newRoleName} />
+                  <input onChange={(event) => setNewRolePeople(event.target.value)} placeholder="People" value={newRolePeople} />
+                  <button
+                    aria-label="Add role to project team"
+                    className="icon-action-button confirm"
+                    disabled={!newRoleName.trim() || !newRolePeople.trim()}
+                    onClick={handleAddProjectRole}
+                    title="Add role"
+                    type="button"
+                  >
+                    <CheckIcon />
+                  </button>
+                </div>
+              ) : null}
+              <div className="overview-table-actions">
+                <button aria-label="Save project details" className="icon-action-button confirm" title="Save" type="submit">
+                  <CheckIcon />
+                </button>
+                <button
+                  aria-label="Cancel project details edit"
+                  className="icon-action-button"
+                  onClick={cancelProjectTeamEdit}
+                  title="Cancel"
+                  type="button"
+                >
+                  <XIcon />
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="overview-table role-table">
+              <div className="overview-table-head">
+                <span>Role</span>
+                <span>Details</span>
+                <span />
+              </div>
+              {projectRoleFields.map((field) => (
+                <div className="overview-table-row" key={field.id}>
+                  <strong>{field.label}</strong>
+                  <span>{project.roleDetails?.[field.id] || "Not set"}</span>
+                  <span />
+                </div>
+              ))}
+              {customProjectRoleKeys(project.roleDetails).map((roleId) => (
+                <div className="overview-table-row" key={roleId}>
+                  <strong>{roleId}</strong>
+                  <span>{project.roleDetails?.[roleId] || "Not set"}</span>
+                  <span />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="overview-section">
+          <div className="overview-section-heading compact">
+            <div>
+              <h2>Useful links</h2>
+              <p>Docs, designs, or references.</p>
+            </div>
             <button
-              aria-label="Cancel member edit"
-              className="icon-action-button"
-              onClick={() => {
-                setIsEditingMembers(false);
-                setMemberError("");
-                setMembersValue(selectedProject.members.join(", "));
-              }}
-              title="Cancel"
+              aria-expanded={isAddingLink}
+              aria-label="Add useful link"
+              className="icon-action-button confirm"
+              onClick={beginLinkAdd}
+              title="Add useful link"
               type="button"
             >
-              <XIcon />
+              <PlusIcon />
             </button>
           </div>
-        </form>
+          <div className="overview-table links-table">
+            <div className="overview-table-head">
+              <span>Name</span>
+              <span>Link</span>
+              <span />
+            </div>
+            {projectLinks.map((link) => (
+              <div className="overview-table-row project-link-row" key={link.id}>
+                <strong>{link.name}</strong>
+                {link.address ? (
+                  <a className="project-link-anchor" href={linkHrefFromText(link.address) || link.address} rel="noreferrer" target="_blank">
+                    {link.linkText}
+                  </a>
+                ) : (
+                  <span>{link.linkText}</span>
+                )}
+                <div className="row-actions">
+                  <button aria-label="Edit useful link" className="icon-action-button" onClick={() => beginLinkEdit(link)} type="button"><EditIcon /></button>
+                  <button
+                    aria-label="Delete useful link"
+                    className="icon-action-button danger"
+                    onClick={() => {
+                      if (window.confirm(`Delete ${link.name}?`)) onDeleteProjectLink(link);
+                    }}
+                    type="button"
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      {isAddingLink || editingLinkId ? (
+        <div className="modal-backdrop" role="presentation">
+          <form
+            aria-label={editingLinkId ? "Edit useful link" : "Add useful link"}
+            className="confirmation-dialog useful-link-dialog"
+            onSubmit={editingLinkId ? handleLinkEdit : handleAddLink}
+          >
+            <h2>{editingLinkId ? "Edit useful link" : "Add useful link"}</h2>
+            <label>
+              <span>Name</span>
+              <input onChange={(event) => setLinkName(event.target.value)} placeholder="Design doc" value={linkName} />
+            </label>
+            <label>
+              <span>Address</span>
+              <input onChange={(event) => setLinkAddress(event.target.value)} placeholder="https://example.com" value={linkAddress} />
+            </label>
+            <label>
+              <span>Link text</span>
+              <input onChange={(event) => setLinkText(event.target.value)} placeholder="Open design doc" value={linkText} />
+            </label>
+            <div className="dialog-actions">
+              <button
+                className="primary-action"
+                disabled={!linkName.trim() || !linkAddress.trim() || !linkText.trim()}
+                type="submit"
+              >
+                Save
+              </button>
+              <button className="secondary-action" onClick={closeLinkDialog} type="button">Cancel</button>
+            </div>
+          </form>
+        </div>
       ) : null}
-    </section>
+
+      <section className="overview-section milestone-section">
+        <div className="overview-section-heading">
+          <div>
+            <h2>Milestones</h2>
+            <p>{completePhaseCount} of {phases.length} phases complete · {overallProgress}% progress</p>
+          </div>
+          <div className="milestone-header-actions">
+            <button
+              className="secondary-action compact"
+              onClick={() => {
+                setIsPhaseTrackerCollapsed((isCollapsed) => {
+                  if (isCollapsed) {
+                    setExpandedPhaseId(phases.find((phase) => phase.status !== "done")?.id ?? phases[0]?.id ?? null);
+                    return false;
+                  }
+                  setExpandedPhaseId(null);
+                  return true;
+                });
+              }}
+              type="button"
+            >
+              {isPhaseTrackerCollapsed ? "Show phases" : "Collapse phases"}
+            </button>
+            <button className="secondary-action compact" onClick={() => setIsPhaseDialogOpen(true)} type="button">
+              <PlusIcon /> Phase
+            </button>
+            <button
+              className="primary-action compact"
+              onClick={() => {
+                setNewItemPhaseId(String(expandedPhase?.id ?? phases[0]?.id ?? ""));
+                setIsItemDialogOpen(true);
+              }}
+              type="button"
+            >
+              <PlusIcon /> Item
+            </button>
+          </div>
+        </div>
+
+        <div className="milestone-progress-panel">
+          <div className="progress-ring" style={{ "--progress": `${overallProgress}%` }}>
+            <span>{overallProgress}%</span>
+          </div>
+          <div>
+            <strong>Project progress</strong>
+            <span>{completeSubtypeCount} of {totalSubtypeCount} checklist items complete</span>
+          </div>
+          <div>
+            <strong>Next</strong>
+            <span>{nextSubtype ? `${nextPhase.name}: ${nextSubtype.title}` : "All milestone items are complete"}</span>
+          </div>
+          <div>
+            <strong>Phases</strong>
+            <span>{completePhaseCount} complete, {Math.max(phases.length - completePhaseCount, 0)} remaining</span>
+          </div>
+        </div>
+
+        {!isPhaseTrackerCollapsed ? (
+          <>
+            <div className="phase-strip" aria-label="Project phases">
+              {phases.map((phase, index) => (
+                <div
+                  className={`phase-step-shell ${expandedPhase?.id === phase.id ? "active" : ""} ${draggedPhaseId === phase.id ? "dragging" : ""} ${dragOverPhaseId === phase.id && draggedPhaseId !== phase.id ? "drop-target" : ""}`}
+                  draggable
+                  key={phase.id}
+                  onDragEnd={() => {
+                    setDraggedPhaseId(null);
+                    setDragOverPhaseId(null);
+                  }}
+                  onDragEnter={() => {
+                    if (draggedPhaseId && draggedPhaseId !== phase.id) setDragOverPhaseId(phase.id);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggedPhaseId && draggedPhaseId !== phase.id) setDragOverPhaseId(phase.id);
+                  }}
+                  onDragStart={(event) => {
+                    setDraggedPhaseId(phase.id);
+                    event.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (!draggedPhaseId || draggedPhaseId === phase.id) return;
+                    onReorderPhases(project.id, reorderedIds(phases, draggedPhaseId, phase.id));
+                    setDraggedPhaseId(null);
+                    setDragOverPhaseId(null);
+                  }}
+                >
+                  <button
+                    aria-expanded={expandedPhase?.id === phase.id}
+                    className={`phase-step ${phase.status} ${expandedPhase?.id === phase.id ? "active" : ""}`}
+                    onClick={() => setExpandedPhaseId((currentPhaseId) => currentPhaseId === phase.id ? null : phase.id)}
+                    type="button"
+                  >
+                    <span className="phase-dot" />
+                    <span>{index + 1}. {phase.name}</span>
+                    <em>{phase.progress}%</em>
+                    <ChevronRightIcon />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {expandedPhase ? (
+              <div className="phase-detail">
+            {editingPhaseId === expandedPhase.id ? (
+              <form className="phase-title-edit" onSubmit={handlePhaseEdit}>
+                <input onChange={(event) => setPhaseName(event.target.value)} value={phaseName} />
+                <input onChange={(event) => setPhaseMilestone(event.target.value)} value={phaseMilestone} />
+                <button aria-label="Save phase" className="icon-action-button confirm" title="Save" type="submit"><CheckIcon /></button>
+                <button aria-label="Cancel phase edit" className="icon-action-button" onClick={() => setEditingPhaseId(null)} title="Cancel" type="button"><XIcon /></button>
+              </form>
+            ) : (
+              <div className="phase-detail-heading">
+                <div>
+                  <h3>{expandedPhase.name}</h3>
+                  <p>{expandedPhase.milestone}</p>
+                </div>
+                <div className="row-actions visible">
+                  <button aria-label="Edit phase" className="icon-action-button" onClick={() => beginPhaseEdit(expandedPhase)} type="button"><EditIcon /></button>
+                  <button
+                    aria-label="Delete phase"
+                    className="icon-action-button danger"
+                    onClick={() => {
+                      if (window.confirm(`Delete ${expandedPhase.name}?`)) onDeletePhase(expandedPhase);
+                    }}
+                    type="button"
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="phase-items table">
+              <div className="phase-items-head">
+                <span>Item</span>
+                <span>Actions</span>
+              </div>
+              {expandedPhase.items.map((item) => (
+                <div
+                  className={`phase-item-row ${draggedItemId === item.id ? "dragging" : ""} ${dragOverItemId === item.id && draggedItemId !== item.id ? "drop-target" : ""}`}
+                  draggable
+                  key={item.id}
+                  onDragEnd={() => {
+                    setDraggedItemId(null);
+                    setDragOverItemId(null);
+                  }}
+                  onDragEnter={() => {
+                    if (draggedItemId && draggedItemId !== item.id) setDragOverItemId(item.id);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggedItemId && draggedItemId !== item.id) setDragOverItemId(item.id);
+                  }}
+                  onDragStart={(event) => {
+                    setDraggedItemId(item.id);
+                    event.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (!draggedItemId || draggedItemId === item.id) return;
+                    onReorderPhaseItems(expandedPhase.id, reorderedIds(expandedPhase.items, draggedItemId, item.id));
+                    setDraggedItemId(null);
+                    setDragOverItemId(null);
+                  }}
+                >
+                  <input
+                    aria-label={`Mark ${item.title} complete`}
+                    checked={item.completed}
+                    onChange={(event) => onUpdatePhaseItem(item.id, { completed: event.target.checked })}
+                    type="checkbox"
+                  />
+                  {editingItemId === item.id ? (
+                    <form className="phase-item-edit" onSubmit={handleItemEdit}>
+                      <input onChange={(event) => setItemTitle(event.target.value)} value={itemTitle} />
+                      <button aria-label="Save subtype" className="icon-action-button confirm" title="Save" type="submit"><CheckIcon /></button>
+                      <button aria-label="Cancel subtype edit" className="icon-action-button" onClick={() => setEditingItemId(null)} title="Cancel" type="button"><XIcon /></button>
+                    </form>
+                  ) : (
+                    <>
+                      <span className={item.completed ? "complete" : ""}>{item.title}</span>
+                      <div className="row-actions">
+                        <button aria-label="Edit subtype" className="icon-action-button" onClick={() => beginItemEdit(item)} type="button"><EditIcon /></button>
+                        <button
+                          aria-label="Delete subtype"
+                          className="icon-action-button danger"
+                          onClick={() => {
+                            if (window.confirm(`Delete ${item.title}?`)) onDeletePhaseItem(item);
+                          }}
+                          type="button"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      <ProjectMemoryLane actions={actions} decisions={decisions} updates={updates} />
+
+      {isPhaseDialogOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="add-milestone-phase-title"
+            aria-modal="true"
+            className="confirmation-dialog milestone-item-dialog"
+            role="dialog"
+          >
+            <div>
+              <p className="eyebrow">Milestone phase</p>
+              <h2 id="add-milestone-phase-title">Add phase</h2>
+            </div>
+            <form className="milestone-item-form" onSubmit={handleAddPhase}>
+              <label>
+                Phase name
+                <input
+                  autoFocus
+                  onChange={(event) => setNewPhaseName(event.target.value)}
+                  placeholder="Phase name"
+                  value={newPhaseName}
+                />
+              </label>
+              <label>
+                Subtypes
+                <textarea
+                  onChange={(event) => setNewPhaseItems(event.target.value)}
+                  placeholder="One subtype per line"
+                  value={newPhaseItems}
+                />
+              </label>
+              <div className="dialog-actions">
+                <button
+                  className="secondary-action"
+                  onClick={() => {
+                    setIsPhaseDialogOpen(false);
+                    setNewPhaseName("");
+                    setNewPhaseItems("");
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button className="primary-action" disabled={!newPhaseName.trim()} type="submit">
+                  Add phase
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {isItemDialogOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="add-milestone-item-title"
+            aria-modal="true"
+            className="confirmation-dialog milestone-item-dialog"
+            role="dialog"
+          >
+            <div>
+              <p className="eyebrow">Milestone item</p>
+              <h2 id="add-milestone-item-title">Add subtype</h2>
+            </div>
+            <form className="milestone-item-form" onSubmit={handleAddItem}>
+              <label>
+                Phase
+                <select onChange={(event) => setNewItemPhaseId(event.target.value)} value={newItemPhaseId || String(expandedPhase?.id ?? phases[0]?.id ?? "")}>
+                  {phases.map((phase) => (
+                    <option key={phase.id} value={phase.id}>
+                      {phase.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Subtype
+                <input
+                  autoFocus
+                  onChange={(event) => setNewItemTitle(event.target.value)}
+                  placeholder="Subtype name"
+                  value={newItemTitle}
+                />
+              </label>
+              <div className="dialog-actions">
+                <button
+                  className="secondary-action"
+                  onClick={() => {
+                    setIsItemDialogOpen(false);
+                    setNewItemPhaseId("");
+                    setNewItemTitle("");
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button className="primary-action" disabled={!newItemTitle.trim()} type="submit">
+                  Add item
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -886,12 +2136,27 @@ function DeleteProjectNoteDialog({ note, onCancel, onConfirm }) {
 function ProjectSummaryDialog({ onClose, project, summary }) {
   if (!summary) return null;
 
+  const [copied, setCopied] = useState(false);
   const sections = [
+    { label: "Completed", items: summary.done ?? [] },
     { label: "Pending", items: summary.pending ?? [] },
     { label: "Blocked", items: summary.blocked ?? [] },
-    { label: "Done", items: summary.done ?? [] },
-    { label: "Key decisions", items: summary.keyDecisions ?? [] },
+    { label: "Risks", items: summary.risks ?? [] },
+    { label: "Key Decisions", items: summary.keyDecisions ?? [] },
+    { label: "Customer Asks", items: summary.customerAsks ?? [] },
+    { label: "Next Steps", items: summary.nextSteps ?? [] },
   ];
+  const summaryText = projectSummaryText(project, summary);
+  const statusTone = String(summary.status || "Yellow").toLowerCase();
+
+  async function handleCopySummary() {
+    try {
+      await navigator.clipboard.writeText(summaryText);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -903,11 +2168,17 @@ function ProjectSummaryDialog({ onClose, project, summary }) {
         role="dialog"
       >
         <div className="summary-dialog-header">
-          <p className="eyebrow">AI summary</p>
+          <p className="eyebrow">Executive summary</p>
           <h2 id="project-summary-title">{summary.headline || project.name}</h2>
+          <div className="executive-summary-meta">
+            <span className={`health-pill ${statusTone}`}>
+              <span>Status</span>
+              <strong>{summary.status || "Yellow"}</strong>
+            </span>
+            {summary.reportDate ? <span>{formatDisplayDate(summary.reportDate)}</span> : null}
+          </div>
         </div>
         <div className="summary-dialog-body">
-          <p id="project-summary-overview">{summary.overview}</p>
           <div className="summary-dialog-sections">
             {sections.map((section) =>
               section.items.length ? (
@@ -923,6 +2194,96 @@ function ProjectSummaryDialog({ onClose, project, summary }) {
             )}
           </div>
         </div>
+        <div className="dialog-actions">
+          <button className="secondary-action" onClick={handleCopySummary} type="button">
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <a
+            className="secondary-action"
+            download={`${project.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-summary.txt`}
+            href={`data:text/plain;charset=utf-8,${encodeURIComponent(summaryText)}`}
+          >
+            Export text
+          </a>
+          <button className="secondary-action" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProjectAskDialog({ onAskQuestion, onClose, project }) {
+  const [answer, setAnswer] = useState(null);
+  const [error, setError] = useState("");
+  const [isAsking, setIsAsking] = useState(false);
+  const [question, setQuestion] = useState("");
+
+  async function handleAsk(event) {
+    event.preventDefault();
+    if (!question.trim()) return;
+    try {
+      setIsAsking(true);
+      setError("");
+      const result = await onAskQuestion(project.id, question);
+      setAnswer(result);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not answer from project memory.");
+    } finally {
+      setIsAsking(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        aria-labelledby="project-ask-title"
+        aria-modal="true"
+        className="confirmation-dialog summary-dialog project-ask-dialog"
+        role="dialog"
+      >
+        <div className="summary-dialog-header">
+          <p className="eyebrow">Project memory</p>
+          <h2 id="project-ask-title">Ask Project Pulse</h2>
+        </div>
+        <form className="project-ask-form" onSubmit={handleAsk}>
+          <label>
+            Question
+            <input
+              autoFocus
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="What is still pending from the last update?"
+              value={question}
+            />
+          </label>
+          <button className="primary-action" disabled={isAsking || !question.trim()} type="submit">
+            {isAsking ? "Asking" : "Ask"}
+          </button>
+        </form>
+        {error ? <p className="upload-error" role="alert">{error}</p> : null}
+        {answer ? (
+          <div className="project-ask-answer">
+            <strong>Answer</strong>
+            <p>{answer.answer}</p>
+            {answer.sources?.length ? (
+              <div className="project-ask-sources">
+                <span>Sources</span>
+                {answer.sources.map((source, index) => (
+                  <article key={`${source.label}-${source.date}-${index}`}>
+                    <strong>
+                      {source.label}
+                      {source.date ? ` · ${formatDisplayDate(source.date)}` : ""}
+                    </strong>
+                    <p>{source.text}</p>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <p className="memory-lane-summary">Ask about decisions, pending work, blockers, milestones, or recent notes.</p>
+        )}
         <div className="dialog-actions">
           <button className="secondary-action" onClick={onClose} type="button">
             Close
@@ -1003,6 +2364,34 @@ function ActionDueIndicator({ action }) {
   return <span className={`due-indicator ${details.tone}`}>{details.label}</span>;
 }
 
+function ActionAgeIndicator({ action }) {
+  const label = actionAgeLabel(action);
+  if (!label) return null;
+  return <span className="age-indicator">{label}</span>;
+}
+
+function DecisionStatusDots({ allowAll = false, label = "Status", onChange, value }) {
+  const options = allowAll ? [{ label: "All", value: "all" }, ...decisionStatuses] : decisionStatuses;
+  return (
+    <div className="decision-status-field">
+      <span>{label}</span>
+      <div className="decision-status-dots">
+        {options.map((status) => (
+          <button
+            aria-label={`${label}: ${status.label}`}
+            aria-pressed={value === status.value}
+            className={`decision-status-dot ${status.value} ${value === status.value ? "selected" : ""}`}
+            key={status.value}
+            onClick={() => onChange(status.value)}
+            title={status.label}
+            type="button"
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ActionTitleEditor({
   action,
   draftTitle,
@@ -1046,6 +2435,7 @@ function ActionTitleEditor({
 function StatusBoard({
   actions,
   onActionTitleChange,
+  onAddAction,
   onCleanDuplicates,
   onCompletionDateChange,
   onDeleteAction,
@@ -1054,6 +2444,7 @@ function StatusBoard({
   onStatusChange,
   project,
 }) {
+  const [completionDate, setCompletionDate] = useState("");
   const [draftTitle, setDraftTitle] = useState("");
   const [draggedActionId, setDraggedActionId] = useState(null);
   const [dragOverStatus, setDragOverStatus] = useState(null);
@@ -1062,11 +2453,19 @@ function StatusBoard({
   const [editError, setEditError] = useState("");
   const [editingActionId, setEditingActionId] = useState(null);
   const [isDoneExpanded, setIsDoneExpanded] = useState(false);
-  const [meetingDateFilter, setMeetingDateFilter] = useState("all");
+  const [isAddingAction, setIsAddingAction] = useState(false);
+  const [dueFilter, setDueFilter] = useState("all");
+  const [meetingEndDate, setMeetingEndDate] = useState("");
+  const [meetingStartDate, setMeetingStartDate] = useState("");
   const [openActionMenuId, setOpenActionMenuId] = useState(null);
+  const [owner, setOwner] = useState("");
+  const [ownerFilter, setOwnerFilter] = useState("all");
+  const [selectedActionIds, setSelectedActionIds] = useState([]);
+  const [title, setTitle] = useState("");
   const [density, setDensity] = useState("compact");
 
   useEffect(() => {
+    setCompletionDate("");
     setDraftTitle("");
     setDraggedActionId(null);
     setDragOverStatus(null);
@@ -1075,10 +2474,22 @@ function StatusBoard({
     setEditError("");
     setEditingActionId(null);
     setIsDoneExpanded(false);
-    setMeetingDateFilter("all");
+    setIsAddingAction(false);
+    setDueFilter("all");
+    setMeetingEndDate("");
+    setMeetingStartDate("");
     setOpenActionMenuId(null);
+    setOwner("");
+    setOwnerFilter("all");
+    setSelectedActionIds([]);
+    setTitle("");
     setDensity("compact");
   }, [project.id]);
+
+  useEffect(() => {
+    const validIds = new Set(actions.map((action) => action.id));
+    setSelectedActionIds((currentIds) => currentIds.filter((actionId) => validIds.has(actionId)));
+  }, [actions]);
 
   function beginActionEdit(action) {
     setDraftTitle(action.title);
@@ -1122,12 +2533,72 @@ function StatusBoard({
     await onStatusChange(droppedActionId, targetStatus);
   }
 
+  async function handleSubmitNewAction(event) {
+    event.preventDefault();
+    if (!title.trim()) return;
+    await onAddAction({
+      completionDate: completionDate || null,
+      owner: owner || null,
+      status: "active",
+      title,
+    });
+    setCompletionDate("");
+    setOwner("");
+    setTitle("");
+    setIsAddingAction(false);
+  }
+
+  function cancelAddAction() {
+    setCompletionDate("");
+    setOwner("");
+    setTitle("");
+    setIsAddingAction(false);
+  }
+
+  function handleSelectAction(actionId, checked) {
+    setSelectedActionIds((currentIds) => {
+      if (checked) {
+        return currentIds.includes(actionId) ? currentIds : currentIds.concat(actionId);
+      }
+      return currentIds.filter((currentId) => currentId !== actionId);
+    });
+  }
+
+  function handleSelectVisibleActions(checked) {
+    const visibleIds = filteredDisplayActions.map((action) => action.id);
+    setSelectedActionIds((currentIds) => {
+      if (checked) {
+        return Array.from(new Set(currentIds.concat(visibleIds)));
+      }
+      const visibleIdSet = new Set(visibleIds);
+      return currentIds.filter((actionId) => !visibleIdSet.has(actionId));
+    });
+  }
+
+  function clearActionBoardFilters() {
+    setOwnerFilter("all");
+    setDueFilter("all");
+    setMeetingStartDate("");
+    setMeetingEndDate("");
+  }
+
   const displayActions = dedupeActionsForDisplay(actions);
   const hiddenDuplicateCount = actions.length - displayActions.length;
-  const meetingDateOptions = actionMeetingDates(displayActions);
   const filteredDisplayActions = displayActions.filter(
-    (action) => meetingDateFilter === "all" || action.meetingDate === meetingDateFilter,
+    (action) => {
+      const ownerMatches =
+        ownerFilter === "all" || (ownerFilter === "" ? action.owner === null : action.owner === ownerFilter);
+      return (
+        ownerMatches &&
+        actionMatchesDueFilter(action, dueFilter) &&
+        actionMatchesMeetingRange(action, meetingStartDate, meetingEndDate)
+      );
+    },
   );
+  const selectedActions = actions.filter((action) => selectedActionIds.includes(action.id));
+  const allVisibleSelected =
+    filteredDisplayActions.length > 0 &&
+    filteredDisplayActions.every((action) => selectedActionIds.includes(action.id));
   const actionsByStatus = actionStatuses.reduce((collection, status) => {
     collection[status.value] = filteredDisplayActions
       .filter((action) => action.status === status.value)
@@ -1135,32 +2606,76 @@ function StatusBoard({
     return collection;
   }, {});
 
-  if (!actions.length) {
-    return (
-      <section className="empty-guidance">
-        <strong>No action items yet</strong>
-        <p>Add an action from Status by Person, or extract action items from Meeting Notes.</p>
-      </section>
-    );
-  }
-
   return (
     <div className={`status-board-wrap ${density}`}>
-      {hiddenDuplicateCount || meetingDateOptions.length ? (
+      {hiddenDuplicateCount || actions.length ? (
         <div className="board-toolbar compact">
-          {meetingDateOptions.length ? (
-            <label className="compact-filter meeting-filter">
-              Meeting
-              <select onChange={(event) => setMeetingDateFilter(event.target.value)} value={meetingDateFilter}>
-                <option value="all">All</option>
-                {meetingDateOptions.map((meetingDateOption) => (
-                  <option key={meetingDateOption} value={meetingDateOption}>
-                    {formatDisplayDate(meetingDateOption)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
+          <label className="compact-filter">
+            Owner
+            <select onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
+              <option value="all">All</option>
+              <option value="">Unassigned</option>
+              {project.members.map((member) => (
+                <option key={member} value={member}>
+                  {member}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="compact-filter due-filter">
+            Due
+            <select onChange={(event) => setDueFilter(event.target.value)} value={dueFilter}>
+              <option value="all">All</option>
+              <option value="overdue">Overdue</option>
+              <option value="today">Today</option>
+              <option value="week">This week</option>
+            </select>
+          </label>
+          <label className="compact-filter date-filter">
+            Meeting from
+            <input
+              onChange={(event) => setMeetingStartDate(event.target.value)}
+              type="date"
+              value={meetingStartDate}
+            />
+          </label>
+          <label className="compact-filter date-filter">
+            Meeting to
+            <input
+              onChange={(event) => setMeetingEndDate(event.target.value)}
+              type="date"
+              value={meetingEndDate}
+            />
+          </label>
+          <button
+            aria-label="Clear action board filters"
+            className="icon-action-button board-clear-filter-button"
+            disabled={ownerFilter === "all" && dueFilter === "all" && !meetingStartDate && !meetingEndDate}
+            onClick={clearActionBoardFilters}
+            title="Clear filters"
+            type="button"
+          >
+            <XIcon />
+          </button>
+          <label className="inline-check bulk-select">
+            <input
+              checked={allVisibleSelected}
+              disabled={!filteredDisplayActions.length}
+              onChange={(event) => handleSelectVisibleActions(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Select All</span>
+          </label>
+          <button
+            aria-label={`Delete selected actions${selectedActions.length ? ` (${selectedActions.length})` : ""}`}
+            className="icon-action-button danger bulk-delete-button"
+            disabled={!selectedActions.length}
+            onClick={() => onDeleteActions(selectedActions)}
+            title={selectedActions.length ? `Delete ${selectedActions.length} selected actions` : "Delete selected actions"}
+            type="button"
+          >
+            <TrashIcon />
+          </button>
           {hiddenDuplicateCount ? (
             <button
               className="secondary-action quiet compact"
@@ -1171,7 +2686,26 @@ function StatusBoard({
               Clean duplicates
             </button>
           ) : null}
+          <button
+            aria-label="Add action item"
+            className="icon-action-button add-action-button"
+            onClick={() => setIsAddingAction(true)}
+            title="Add action item"
+            type="button"
+          >
+            <PlusIcon />
+          </button>
         </div>
+      ) : null}
+      {!actions.length ? (
+        <section className="empty-guidance">
+          <strong>No action items yet</strong>
+          <p>Add a new action here, or extract action items from Meeting Notes.</p>
+          <button className="primary-action compact empty-action-button" onClick={() => setIsAddingAction(true)} type="button">
+            <PlusIcon />
+            Add action
+          </button>
+        </section>
       ) : null}
       <div className="board">
       {actionStatuses.map((status) => {
@@ -1234,6 +2768,13 @@ function StatusBoard({
                 >
                   <div className="task-card-header">
                     <div className="task-title-with-handle">
+                      <label className="action-select-control board-select-control" title="Select action">
+                        <input
+                          checked={selectedActionIds.includes(action.id)}
+                          onChange={(event) => handleSelectAction(action.id, event.target.checked)}
+                          type="checkbox"
+                        />
+                      </label>
                       <span className="drag-handle" title="Drag to change status">
                         <GripIcon />
                       </span>
@@ -1333,6 +2874,7 @@ function StatusBoard({
                       />
                     )}
                     <ActionDueIndicator action={action} />
+                    <ActionAgeIndicator action={action} />
                     <ActionMeetingTag action={action} />
                   </div>
                 </article>
@@ -1344,479 +2886,114 @@ function StatusBoard({
         );
       })}
       </div>
-    </div>
-  );
-}
-
-function ActionsByPerson({
-  actions,
-  onActionTitleChange,
-  onAddAction,
-  onCleanDuplicates,
-  onCompletionDateChange,
-  onDeleteAction,
-  onDeleteActions,
-  onOwnerChange,
-  onStatusChange,
-  project,
-}) {
-  const [completionDate, setCompletionDate] = useState("");
-  const [draftTitle, setDraftTitle] = useState("");
-  const [editingDateActionId, setEditingDateActionId] = useState(null);
-  const [editError, setEditError] = useState("");
-  const [editingActionId, setEditingActionId] = useState(null);
-  const [editingOwnerActionId, setEditingOwnerActionId] = useState(null);
-  const [editingStatusActionId, setEditingStatusActionId] = useState(null);
-  const [isAddingAction, setIsAddingAction] = useState(false);
-  const [isDoneExpanded, setIsDoneExpanded] = useState(false);
-  const [meetingDateFilter, setMeetingDateFilter] = useState("all");
-  const [owner, setOwner] = useState("");
-  const [ownerFilter, setOwnerFilter] = useState("all");
-  const [selectedActionIds, setSelectedActionIds] = useState([]);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [title, setTitle] = useState("");
-
-  useEffect(() => {
-    setDraftTitle("");
-    setEditingDateActionId(null);
-    setEditError("");
-    setEditingActionId(null);
-    setEditingOwnerActionId(null);
-    setEditingStatusActionId(null);
-    setIsAddingAction(false);
-    setIsDoneExpanded(false);
-    setMeetingDateFilter("all");
-    setOwnerFilter("all");
-    setSelectedActionIds([]);
-    setStatusFilter("all");
-  }, [project.id]);
-
-  useEffect(() => {
-    const validIds = new Set(actions.map((action) => action.id));
-    setSelectedActionIds((currentIds) => currentIds.filter((actionId) => validIds.has(actionId)));
-  }, [actions]);
-
-  const displayActions = dedupeActionsForDisplay(actions);
-  const hiddenDuplicateCount = actions.length - displayActions.length;
-  const meetingDateOptions = actionMeetingDates(displayActions);
-  const visibleActions = displayActions
-    .filter((action) => {
-      const ownerMatches =
-        ownerFilter === "all" || (ownerFilter === "" ? action.owner === null : action.owner === ownerFilter);
-      const statusMatches =
-        statusFilter === "all" ||
-        (statusFilter === "overdue" ? dueDateDetails(action)?.tone === "overdue" : action.status === statusFilter);
-      const meetingDateMatches = meetingDateFilter === "all" || action.meetingDate === meetingDateFilter;
-      return ownerMatches && statusMatches && meetingDateMatches;
-    })
-    .sort(compareActionsByDueDateAndStatus);
-  const openActions = visibleActions.filter((action) => action.status !== "done");
-  const doneActions = visibleActions.filter((action) => action.status === "done");
-  const hasOverdueActions = actions.some((action) => dueDateDetails(action)?.tone === "overdue");
-  const selectedActions = actions.filter((action) => selectedActionIds.includes(action.id));
-  const allVisibleSelected = visibleActions.length > 0 && visibleActions.every((action) => selectedActionIds.includes(action.id));
-
-  async function handleSubmit(event) {
-    event.preventDefault();
-    if (!title.trim()) return;
-    await onAddAction({
-      completionDate: completionDate || null,
-      owner: owner || null,
-      status: "active",
-      title,
-    });
-    setCompletionDate("");
-    setTitle("");
-    setIsAddingAction(false);
-  }
-
-  function cancelAddAction() {
-    setCompletionDate("");
-    setOwner("");
-    setTitle("");
-    setIsAddingAction(false);
-  }
-
-  function handleSelectAction(actionId, checked) {
-    setSelectedActionIds((currentIds) => {
-      if (checked) {
-        return currentIds.includes(actionId) ? currentIds : currentIds.concat(actionId);
-      }
-      return currentIds.filter((currentId) => currentId !== actionId);
-    });
-  }
-
-  function handleSelectVisibleActions(checked) {
-    const visibleIds = visibleActions.map((action) => action.id);
-    setSelectedActionIds((currentIds) => {
-      if (checked) {
-        return Array.from(new Set(currentIds.concat(visibleIds)));
-      }
-      const visibleIdSet = new Set(visibleIds);
-      return currentIds.filter((actionId) => !visibleIdSet.has(actionId));
-    });
-  }
-
-  function beginActionEdit(action) {
-    setDraftTitle(action.title);
-    setEditingDateActionId(null);
-    setEditError("");
-    setEditingActionId(action.id);
-    setEditingOwnerActionId(null);
-    setEditingStatusActionId(null);
-  }
-
-  function cancelActionEdit() {
-    setDraftTitle("");
-    setEditError("");
-    setEditingActionId(null);
-  }
-
-  async function saveActionEdit(event, action) {
-    event.preventDefault();
-    if (!draftTitle.trim()) {
-      setEditError("Action title is required.");
-      return;
-    }
-
-    try {
-      await onActionTitleChange(action.id, draftTitle);
-      cancelActionEdit();
-    } catch (error) {
-      setEditError(error instanceof Error ? error.message : "Could not update action.");
-    }
-  }
-
-  function renderActionRow(action) {
-    return (
-      <article className={`action-row ${action.status}`} data-action-id={action.id} key={action.id}>
-        <label className="action-select-control" title="Select action">
-          <input
-            checked={selectedActionIds.includes(action.id)}
-            onChange={(event) => handleSelectAction(action.id, event.target.checked)}
-            type="checkbox"
-          />
-        </label>
-        <div className="action-row-main">
-          <ActionTitleEditor
-            action={action}
-            draftTitle={draftTitle}
-            error={editError}
-            isEditing={editingActionId === action.id}
-            onCancel={cancelActionEdit}
-            onDraftChange={setDraftTitle}
-            onSave={saveActionEdit}
-          />
-          <span className="action-meta-row">
-            {editingOwnerActionId === action.id ? (
-              <ActionOwnerSelect
-                action={action}
-                onOwnerChange={async (actionId, nextOwner) => {
-                  await onOwnerChange(actionId, nextOwner);
-                  setEditingOwnerActionId(null);
-                }}
-                project={project}
-              />
-            ) : (
-              <button
-                className="meta-pill owner"
-                onClick={() => {
-                  setEditingDateActionId(null);
-                  setEditingStatusActionId(null);
-                  setEditingOwnerActionId(action.id);
-                }}
-                type="button"
-              >
-                {action.owner || "Unassigned"}
-              </button>
-            )}
-            {editingDateActionId === action.id ? (
-              <ActionCompletionDateInput
-                action={action}
-                onCompletionDateChange={async (actionId, nextDate) => {
-                  await onCompletionDateChange(actionId, nextDate);
-                  setEditingDateActionId(null);
-                }}
-              />
-            ) : (
-              <button
-                className="meta-pill date"
-                onClick={() => {
-                  setEditingOwnerActionId(null);
-                  setEditingStatusActionId(null);
-                  setEditingDateActionId(action.id);
-                }}
-                type="button"
-              >
-                {action.completionDate ? formatDisplayDate(action.completionDate) : "No date"}
-              </button>
-            )}
-            {editingStatusActionId === action.id ? (
-              <div className="quick-status-group compact">
-                {actionStatuses.map((status) => (
-                  <button
-                    aria-pressed={action.status === status.value}
-                    className={`quick-status ${status.value}`}
-                    key={status.value}
-                    onClick={async () => {
-                      await onStatusChange(action.id, status.value);
-                      setEditingStatusActionId(null);
-                    }}
-                    type="button"
-                  >
-                    {status.label}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <button
-                className={`meta-pill status ${action.status}`}
-                onClick={() => {
-                  setEditingDateActionId(null);
-                  setEditingOwnerActionId(null);
-                  setEditingStatusActionId(action.id);
-                }}
-                type="button"
-              >
-                {actionStatuses.find((status) => status.value === action.status)?.label ?? "Active"}
-              </button>
-            )}
-            <ActionDueIndicator action={action} />
-            <ActionMeetingTag action={action} />
-          </span>
-        </div>
-        <span className="action-row-controls visible">
-          {editingActionId === action.id ? null : (
-            <>
-              <button
-                aria-label={`Edit ${action.title}`}
-                className="action-edit-button"
-                onClick={() => beginActionEdit(action)}
-                title="Edit action"
-                type="button"
-              >
-                <EditIcon />
-              </button>
-              <button
-                aria-label={`Delete ${action.title}`}
-                className="action-delete-button"
-                onClick={() => onDeleteAction(action)}
-                title="Delete action"
-                type="button"
-              >
-                <TrashIcon />
-              </button>
-            </>
-          )}
-        </span>
-      </article>
-    );
-  }
-
-  return (
-    <div className="panel-stack">
-      <div className="person-controls">
-        <div className="filter-row">
-          <label className="compact-filter">
-            Owner
-            <select onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
-              <option value="all">All</option>
-              <option value="">Unassigned</option>
-              {project.members.map((member) => (
-                <option key={member} value={member}>
-                  {member}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="compact-filter">
-            Status
-            <select onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
-              <option value="all">All</option>
-              {actionStatuses.map((status) => (
-                <option key={status.value} value={status.value}>
-                  {status.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <button
-            aria-pressed={statusFilter === "overdue"}
-            className="quick-filter overdue"
-            disabled={!hasOverdueActions}
-            onClick={() => setStatusFilter((currentFilter) => (currentFilter === "overdue" ? "all" : "overdue"))}
-            type="button"
-          >
-            Overdue
-          </button>
-
-          {meetingDateOptions.length ? (
-            <label className="compact-filter meeting-filter">
-              Meeting
-              <select onChange={(event) => setMeetingDateFilter(event.target.value)} value={meetingDateFilter}>
-                <option value="all">All</option>
-                {meetingDateOptions.map((meetingDateOption) => (
-                  <option key={meetingDateOption} value={meetingDateOption}>
-                    {formatDisplayDate(meetingDateOption)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          <label className="inline-check bulk-select">
-            <input
-              checked={allVisibleSelected}
-              disabled={!visibleActions.length}
-              onChange={(event) => handleSelectVisibleActions(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Select visible</span>
-          </label>
-
-          <button
-            className="danger-action compact"
-            disabled={!selectedActions.length}
-            onClick={() => onDeleteActions(selectedActions)}
-            type="button"
-          >
-            Delete selected{selectedActions.length ? ` (${selectedActions.length})` : ""}
-          </button>
-
-          {hiddenDuplicateCount ? (
-            <button
-              className="secondary-action quiet compact"
-              onClick={onCleanDuplicates}
-              title={`${hiddenDuplicateCount} duplicate actions hidden`}
-              type="button"
-            >
-              Clean duplicates
-            </button>
-          ) : null}
-        </div>
-
-        <button
-          aria-expanded={isAddingAction}
-          aria-label="Add action item"
-          className="icon-action-button add-action-button"
-          onClick={() => setIsAddingAction((isAdding) => !isAdding)}
-          title="Add action item"
-          type="button"
-        >
-          <PlusIcon />
-        </button>
-      </div>
-
       {isAddingAction ? (
-        <form className="inline-form action-add-form" onSubmit={handleSubmit}>
-          <label>
-            Owner
-            <select onChange={(event) => setOwner(event.target.value)} value={owner}>
-              <option value="">Unassigned</option>
-              {project.members.map((member) => (
-                <option key={member} value={member}>
-                  {member}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            Action item
-            <input
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="Follow up on launch checklist"
-              value={title}
-            />
-          </label>
-
-          <label>
-            Complete by
-            <input
-              onChange={(event) => setCompletionDate(event.target.value)}
-              type="date"
-              value={completionDate}
-            />
-          </label>
-
-          <div className="icon-form-actions">
-            <button aria-label="Save action item" className="icon-action-button confirm" title="Save" type="submit">
-              <CheckIcon />
-            </button>
-            <button
-              aria-label="Cancel action item"
-              className="icon-action-button"
-              onClick={cancelAddAction}
-              title="Cancel"
-              type="button"
-            >
-              <XIcon />
-            </button>
-          </div>
-        </form>
-      ) : null}
-
-      <div className="person-checklist">
-        {visibleActions.length ? (
-          <>
-            {openActions.map(renderActionRow)}
-            {doneActions.length ? (
-              <section className="person-done-group" aria-label="Completed action items">
-                <button
-                  aria-expanded={isDoneExpanded}
-                  className="person-done-toggle"
-                  onClick={() => setIsDoneExpanded((expanded) => !expanded)}
-                  type="button"
-                >
-                  <span>Done</span>
-                  <strong>{doneActions.length}</strong>
-                  <span>{isDoneExpanded ? "Collapse" : "Expand"}</span>
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="new-action-title"
+            aria-modal="true"
+            className="confirmation-dialog action-create-dialog"
+            role="dialog"
+          >
+            <div>
+              <p className="eyebrow">Action Board</p>
+              <h2 id="new-action-title">Add action</h2>
+            </div>
+            <form className="stacked-form" onSubmit={handleSubmitNewAction}>
+              <label>
+                Action item
+                <input
+                  autoFocus
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Follow up on launch checklist"
+                  value={title}
+                />
+              </label>
+              <label>
+                Owner
+                <select onChange={(event) => setOwner(event.target.value)} value={owner}>
+                  <option value="">Unassigned</option>
+                  {project.members.map((member) => (
+                    <option key={member} value={member}>
+                      {member}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Complete by
+                <input
+                  onChange={(event) => setCompletionDate(event.target.value)}
+                  type="date"
+                  value={completionDate}
+                />
+              </label>
+              <div className="dialog-actions">
+                <button className="secondary-action" onClick={cancelAddAction} type="button">
+                  Cancel
                 </button>
-                {isDoneExpanded ? (
-                  <div className="person-done-list">{doneActions.map(renderActionRow)}</div>
-                ) : (
-                  <p className="empty-state compact">Done actions are collapsed.</p>
-                )}
-              </section>
-            ) : null}
-          </>
-        ) : (
-          <p className="empty-state">
-            {actions.length
-              ? "No action items match these filters."
-              : "No action items yet. Use the plus button to add one, or extract actions from Meeting Notes."}
-          </p>
-        )}
-      </div>
+                <button className="primary-action" disabled={!title.trim()} type="submit">
+                  Add action
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function MeetingNotes({
   onConfirmExtractedActions,
+  onAddAction,
+  onDeleteDecision,
   onDeleteProjectNote,
   onExtractActions,
+  onSaveDecision,
   onSaveProjectNote,
+  onUpdateDecision,
   onUpdateProjectNote,
+  decisions,
   project,
   updates,
 }) {
   const [editingNoteId, setEditingNoteId] = useState(null);
   const [editingNoteDate, setEditingNoteDate] = useState("");
   const [editingNoteText, setEditingNoteText] = useState("");
+  const [editingDecisionId, setEditingDecisionId] = useState(null);
+  const [editingDecisionDate, setEditingDecisionDate] = useState("");
+  const [editingDecisionOwner, setEditingDecisionOwner] = useState("");
+  const [editingDecisionStatus, setEditingDecisionStatus] = useState("active");
+  const [editingDecisionText, setEditingDecisionText] = useState("");
   const [editingDraftActionId, setEditingDraftActionId] = useState(null);
   const [editingDraftSnapshot, setEditingDraftSnapshot] = useState(null);
   const [extractionStatus, setExtractionStatus] = useState(null);
+  const [meetingActionDueDate, setMeetingActionDueDate] = useState("");
+  const [meetingActionOwner, setMeetingActionOwner] = useState("");
+  const [meetingActionTitle, setMeetingActionTitle] = useState("");
   const [meetingDate, setMeetingDate] = useState(todayDateInputValue());
   const [notes, setNotes] = useState("");
-  const [noteSearch, setNoteSearch] = useState("");
   const [preview, setPreview] = useState(null);
+  const [selectedDraftActionIds, setSelectedDraftActionIds] = useState([]);
+  const [selectedDraftMemoryIds, setSelectedDraftMemoryIds] = useState([]);
   const [extractError, setExtractError] = useState("");
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isAddingMeetingAction, setIsAddingMeetingAction] = useState(false);
+  const [isDecisionLogExpanded, setIsDecisionLogExpanded] = useState(false);
   const [isFeedExpanded, setIsFeedExpanded] = useState(false);
+  const [isAddingDecision, setIsAddingDecision] = useState(false);
+  const [memoryTab, setMemoryTab] = useState("decisions");
   const [lastSavedNoteKey, setLastSavedNoteKey] = useState("");
+  const [bulkDraftDueDate, setBulkDraftDueDate] = useState("");
+  const [bulkDraftOwner, setBulkDraftOwner] = useState("");
+  const [newDecisionDate, setNewDecisionDate] = useState(todayDateInputValue());
+  const [newDecisionOwner, setNewDecisionOwner] = useState("");
+  const [newDecisionStatus, setNewDecisionStatus] = useState("active");
+  const [newDecisionText, setNewDecisionText] = useState("");
+  const [decisionDateFromFilter, setDecisionDateFromFilter] = useState("");
+  const [decisionDateToFilter, setDecisionDateToFilter] = useState("");
+  const [decisionOwnerFilter, setDecisionOwnerFilter] = useState("all");
+  const [decisionStatusFilter, setDecisionStatusFilter] = useState("all");
   const [uploadedFileName, setUploadedFileName] = useState("");
   const [uploadError, setUploadError] = useState("");
 
@@ -1824,28 +3001,72 @@ function MeetingNotes({
     setEditingNoteId(null);
     setEditingNoteDate("");
     setEditingNoteText("");
+    setEditingDecisionId(null);
+    setEditingDecisionDate("");
+    setEditingDecisionOwner("");
+    setEditingDecisionStatus("active");
+    setEditingDecisionText("");
     setEditingDraftActionId(null);
     setEditingDraftSnapshot(null);
     setExtractionStatus(null);
+    setIsDecisionLogExpanded(false);
     setIsFeedExpanded(false);
+    setIsAddingDecision(false);
     setLastSavedNoteKey("");
+    setIsAddingMeetingAction(false);
+    setMeetingActionDueDate("");
+    setMeetingActionOwner("");
+    setMeetingActionTitle("");
     setMeetingDate(todayDateInputValue());
-    setNoteSearch("");
+    setMemoryTab("decisions");
+    setNewDecisionDate(todayDateInputValue());
+    setNewDecisionOwner("");
+    setNewDecisionStatus("active");
+    setNewDecisionText("");
+    setDecisionDateFromFilter("");
+    setDecisionDateToFilter("");
+    setDecisionOwnerFilter("all");
+    setDecisionStatusFilter("all");
     setPreview(null);
+    setSelectedDraftActionIds([]);
+    setSelectedDraftMemoryIds([]);
+    setBulkDraftDueDate("");
+    setBulkDraftOwner("");
   }, [project.id]);
 
-  const normalizedNoteSearch = noteSearch.trim().toLowerCase();
-  const filteredUpdates = normalizedNoteSearch
-    ? updates.filter((update) =>
-        [
-          update.text,
-          update.person,
-          update.meetingDate,
-          update.meetingDate ? formatDisplayDate(update.meetingDate) : "",
-          update.createdAt,
-        ].some((value) => String(value ?? "").toLowerCase().includes(normalizedNoteSearch)),
-      )
-    : updates;
+  useEffect(() => {
+    const validDraftIds = new Set((preview?.actions ?? []).map((action) => action.draftId));
+    setSelectedDraftActionIds((currentIds) => currentIds.filter((draftId) => validDraftIds.has(draftId)));
+  }, [preview?.actions]);
+
+  useEffect(() => {
+    const validDraftIds = new Set([
+      ...(preview?.memorySuggestions?.decisions ?? []),
+      ...(preview?.memorySuggestions?.blockers ?? []),
+    ].map((item) => item.draftId));
+    setSelectedDraftMemoryIds((currentIds) => currentIds.filter((draftId) => validDraftIds.has(draftId)));
+  }, [preview?.memorySuggestions]);
+
+  const decisionOwnerOptions = [
+    ...new Set(
+      decisions
+        .map((decision) => decision.owner)
+        .filter(Boolean)
+        .concat(project.members),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const filteredDecisions = decisions.filter((decision) => {
+    const ownerMatches = decisionOwnerFilter === "all" || (decision.owner || "") === decisionOwnerFilter;
+    const statusMatches = decisionStatusFilter === "all" || (decision.status || "active") === decisionStatusFilter;
+    const dateTime = decision.decisionDate ? parseDateOnly(decision.decisionDate)?.getTime() : null;
+    const fromTime = decisionDateFromFilter ? parseDateOnly(decisionDateFromFilter)?.getTime() : null;
+    const toTime = decisionDateToFilter ? parseDateOnly(decisionDateToFilter)?.getTime() : null;
+    const fromMatches = !Number.isFinite(fromTime) || (Number.isFinite(dateTime) && dateTime >= fromTime);
+    const toMatches = !Number.isFinite(toTime) || (Number.isFinite(dateTime) && dateTime <= toTime);
+    return ownerMatches && statusMatches && fromMatches && toMatches;
+  });
+  const hasDecisionFilters =
+    decisionOwnerFilter !== "all" || decisionStatusFilter !== "all" || decisionDateFromFilter || decisionDateToFilter;
 
   function beginNoteEdit(update) {
     setEditingNoteId(update.id);
@@ -1888,43 +3109,54 @@ function MeetingNotes({
 
       setExtractionStatus({ message: "Extracting", tone: "progress" });
       const extraction = await onExtractActions({ meetingDate, notes, source });
-      const extractedActions = Array.isArray(extraction.actions)
-        ? extraction.actions.map((action) => ({
-            completionDate: action.completionDate || "",
-            draftId: makeDraftActionId(),
-            meetingDate: action.meetingDate || meetingDate || "",
-            owner: action.owner || "",
-            source: action.source || source,
-            status: action.status || "active",
-            title: action.title || "",
-          }))
-        : [];
+      const extractedActions = dedupeDraftActions(
+        Array.isArray(extraction.actions)
+          ? extraction.actions.map((action) => ({
+              completionDate: action.completionDate || "",
+              draftId: makeDraftActionId(),
+              meetingDate: action.meetingDate || meetingDate || "",
+              owner: action.owner || "",
+              source: action.source || source,
+              status: action.status || "active",
+              title: action.title || "",
+            }))
+          : [],
+      );
+      const memorySuggestions = {
+        blockers: Array.isArray(extraction.memorySuggestions?.blockers)
+          ? extraction.memorySuggestions.blockers.map((text) => ({ draftId: makeDraftMemoryId(), text }))
+          : [],
+        decisions: Array.isArray(extraction.memorySuggestions?.decisions)
+          ? extraction.memorySuggestions.decisions.map((text) => ({ draftId: makeDraftMemoryId(), text }))
+          : [],
+      };
       const actionsFound = extractedActions.length;
+      const memorySuggestionCount = memorySuggestions.decisions.length + memorySuggestions.blockers.length;
       setExtractionStatus(
         actionsFound
           ? { message: `${actionsFound} actions ready to review`, tone: "success" }
-          : { message: "No actions found", tone: "empty" },
+          : memorySuggestionCount
+            ? { message: `${memorySuggestionCount} memory updates ready to review`, tone: "success" }
+            : { message: "No actions found", tone: "empty" },
       );
-      setPreview({
+      setPreview(actionsFound || memorySuggestionCount ? {
         actions: extractedActions,
         actionsAdded: 0,
         confirmed: false,
+        memorySuggestions,
         meetingDate,
         points: extraction.points?.length ? extraction.points : [],
         source,
-      });
+      } : null);
+      setSelectedDraftActionIds([]);
+      setSelectedDraftMemoryIds([]);
       setEditingDraftActionId(null);
       setEditingDraftSnapshot(null);
     } catch (error) {
       setExtractError(error instanceof Error ? error.message : "Could not extract actions.");
       if (noteWasSaved) {
         setExtractionStatus({ message: "No actions found", tone: "empty" });
-        setPreview({
-          actions: [],
-          actionsAdded: 0,
-          points: ["Meeting notes were saved to the project feed.", "No action items were created."],
-          source,
-        });
+        setPreview(null);
       }
     } finally {
       setIsExtracting(false);
@@ -1944,20 +3176,99 @@ function MeetingNotes({
       setNotes(text);
       setUploadedFileName(file.name);
       setUploadError("");
-      setPreview({
-        actions: [],
-        actionsAdded: 0,
-        points: [
-          `${file.name} was loaded into the notes area.`,
-          "Review the text, then extract actions when ready.",
-        ],
-        source: "AI companion notes",
-      });
+      setPreview(null);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : "Could not read this notes file.");
     } finally {
       event.target.value = "";
     }
+  }
+
+  function handleMeetingTemplateSelect(templateText) {
+    setNotes(templateText);
+    setUploadedFileName("");
+    setUploadError("");
+    setExtractError("");
+    setExtractionStatus(null);
+    setPreview(null);
+    setSelectedDraftActionIds([]);
+    setSelectedDraftMemoryIds([]);
+    setBulkDraftOwner("");
+    setBulkDraftDueDate("");
+    setEditingDraftActionId(null);
+    setEditingDraftSnapshot(null);
+  }
+
+  async function handleDecisionSubmit(event) {
+    event.preventDefault();
+    if (!newDecisionText.trim()) return;
+    await onSaveDecision({
+      decisionDate: newDecisionDate || null,
+      owner: newDecisionOwner || null,
+      status: newDecisionStatus,
+      text: newDecisionText,
+    });
+    setNewDecisionText("");
+    setNewDecisionDate(todayDateInputValue());
+    setNewDecisionOwner("");
+    setNewDecisionStatus("active");
+    setIsAddingDecision(false);
+  }
+
+  function beginDecisionEdit(decision) {
+    setEditingDecisionId(decision.id);
+    setEditingDecisionDate(decision.decisionDate || "");
+    setEditingDecisionOwner(decision.owner || "");
+    setEditingDecisionStatus(decision.status || "active");
+    setEditingDecisionText(decision.text);
+    setIsAddingDecision(false);
+  }
+
+  async function handleDecisionUpdate(event) {
+    event.preventDefault();
+    if (!editingDecisionId || !editingDecisionText.trim()) return;
+    await onUpdateDecision(editingDecisionId, {
+      decisionDate: editingDecisionDate || null,
+      owner: editingDecisionOwner || null,
+      status: editingDecisionStatus,
+      text: editingDecisionText,
+    });
+    setEditingDecisionId(null);
+    setEditingDecisionDate("");
+    setEditingDecisionOwner("");
+    setEditingDecisionStatus("active");
+    setEditingDecisionText("");
+  }
+
+  function cancelDecisionEdit() {
+    setEditingDecisionId(null);
+    setEditingDecisionDate("");
+    setEditingDecisionOwner("");
+    setEditingDecisionStatus("active");
+    setEditingDecisionText("");
+  }
+
+  async function handleMeetingActionSubmit(event) {
+    event.preventDefault();
+    if (!meetingActionTitle.trim()) return;
+    await onAddAction({
+      completionDate: meetingActionDueDate || null,
+      owner: meetingActionOwner || null,
+      source: "meeting",
+      status: "active",
+      title: meetingActionTitle,
+    });
+    setMeetingActionDueDate("");
+    setMeetingActionOwner("");
+    setMeetingActionTitle("");
+    setIsAddingMeetingAction(false);
+  }
+
+  function cancelMeetingAction() {
+    setMeetingActionDueDate("");
+    setMeetingActionOwner("");
+    setMeetingActionTitle("");
+    setIsAddingMeetingAction(false);
   }
 
   function handleDraftActionChange(draftId, field, value) {
@@ -1972,6 +3283,74 @@ function MeetingNotes({
     });
   }
 
+  function handleSelectDraftAction(draftId, checked) {
+    setSelectedDraftActionIds((currentIds) => {
+      if (checked) {
+        return currentIds.includes(draftId) ? currentIds : currentIds.concat(draftId);
+      }
+      return currentIds.filter((currentId) => currentId !== draftId);
+    });
+  }
+
+  function handleSelectAllDraftActions(checked) {
+    setSelectedDraftActionIds(checked ? (preview?.actions ?? []).map((action) => action.draftId) : []);
+  }
+
+  function handleDeleteSelectedDraftActions() {
+    if (!selectedDraftActionIds.length) return;
+    const selectedDraftIdSet = new Set(selectedDraftActionIds);
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return {
+        ...currentPreview,
+        actions: currentPreview.actions.filter((action) => !selectedDraftIdSet.has(action.draftId)),
+      };
+    });
+    setSelectedDraftActionIds([]);
+    if (editingDraftActionId && selectedDraftIdSet.has(editingDraftActionId)) {
+      setEditingDraftActionId(null);
+      setEditingDraftSnapshot(null);
+    }
+  }
+
+  function applyOwnerToSelectedDraftActions(ownerValue) {
+    if (!selectedDraftActionIds.length) return;
+    const selectedDraftIdSet = new Set(selectedDraftActionIds);
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return {
+        ...currentPreview,
+        actions: currentPreview.actions.map((action) =>
+          selectedDraftIdSet.has(action.draftId) ? { ...action, owner: ownerValue } : action,
+        ),
+      };
+    });
+  }
+
+  function applyDateToSelectedDraftActions(completionDateValue) {
+    if (!selectedDraftActionIds.length) return;
+    const selectedDraftIdSet = new Set(selectedDraftActionIds);
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return {
+        ...currentPreview,
+        actions: currentPreview.actions.map((action) =>
+          selectedDraftIdSet.has(action.draftId) ? { ...action, completionDate: completionDateValue } : action,
+        ),
+      };
+    });
+  }
+
+  function handleDiscardDraftActions() {
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return { ...currentPreview, actions: [] };
+    });
+    setSelectedDraftActionIds([]);
+    setEditingDraftActionId(null);
+    setEditingDraftSnapshot(null);
+  }
+
   function handleAddDraftAction() {
     const draftId = makeDraftActionId();
     setPreview((currentPreview) => {
@@ -1979,6 +3358,7 @@ function MeetingNotes({
         actions: [],
         actionsAdded: 0,
         confirmed: false,
+        memorySuggestions: { blockers: [], decisions: [] },
         meetingDate,
         points: [],
         source: "meeting",
@@ -2044,6 +3424,135 @@ function MeetingNotes({
     setEditingDraftSnapshot(null);
   }
 
+  function handleMemorySuggestionChange(type, draftId, value) {
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return {
+        ...currentPreview,
+        memorySuggestions: {
+          ...(currentPreview.memorySuggestions ?? { blockers: [], decisions: [] }),
+          [type]: (currentPreview.memorySuggestions?.[type] ?? []).map((item) =>
+            item.draftId === draftId ? { ...item, text: value } : item,
+          ),
+        },
+      };
+    });
+  }
+
+  function handleDeleteMemorySuggestion(type, draftId) {
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      return {
+        ...currentPreview,
+        memorySuggestions: {
+          ...(currentPreview.memorySuggestions ?? { blockers: [], decisions: [] }),
+          [type]: (currentPreview.memorySuggestions?.[type] ?? []).filter((item) => item.draftId !== draftId),
+        },
+      };
+    });
+    setSelectedDraftMemoryIds((currentIds) => currentIds.filter((currentId) => currentId !== draftId));
+  }
+
+  function handleSelectMemorySuggestion(draftId, checked) {
+    setSelectedDraftMemoryIds((currentIds) => {
+      if (checked) {
+        return currentIds.includes(draftId) ? currentIds : currentIds.concat(draftId);
+      }
+      return currentIds.filter((currentId) => currentId !== draftId);
+    });
+  }
+
+  function handleSelectAllMemorySuggestions(checked) {
+    const allIds = [
+      ...(preview?.memorySuggestions?.decisions ?? []),
+      ...(preview?.memorySuggestions?.blockers ?? []),
+    ].map((item) => item.draftId);
+    setSelectedDraftMemoryIds(checked ? allIds : []);
+  }
+
+  function handleDiscardSelectedMemorySuggestions() {
+    if (!selectedDraftMemoryIds.length) return;
+    const selectedIds = new Set(selectedDraftMemoryIds);
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      const nextPreview = {
+        ...currentPreview,
+        memorySuggestions: {
+          decisions: (currentPreview.memorySuggestions?.decisions ?? []).filter((item) => !selectedIds.has(item.draftId)),
+          blockers: (currentPreview.memorySuggestions?.blockers ?? []).filter((item) => !selectedIds.has(item.draftId)),
+        },
+      };
+      const hasActions = Boolean(nextPreview.actions?.length);
+      const hasMemory =
+        Boolean(nextPreview.memorySuggestions.decisions.length) ||
+        Boolean(nextPreview.memorySuggestions.blockers.length);
+      return hasActions || hasMemory ? nextPreview : null;
+    });
+    setSelectedDraftMemoryIds([]);
+  }
+
+  function handleDiscardAllMemorySuggestions() {
+    setPreview((currentPreview) => {
+      if (!currentPreview) return currentPreview;
+      const nextPreview = {
+        ...currentPreview,
+        memorySuggestions: { blockers: [], decisions: [] },
+      };
+      return nextPreview.actions?.length ? nextPreview : null;
+    });
+    setSelectedDraftMemoryIds([]);
+  }
+
+  async function handleConfirmMemorySuggestions() {
+    if (!preview?.memorySuggestions) return;
+    const decisionsToSave = (preview.memorySuggestions.decisions ?? [])
+      .map((item) => item.text.trim())
+      .filter(Boolean);
+    const blockersToSave = (preview.memorySuggestions.blockers ?? [])
+      .map((item) => item.text.trim())
+      .filter(Boolean);
+    if (!decisionsToSave.length && !blockersToSave.length) return;
+
+    try {
+      setIsExtracting(true);
+      setExtractError("");
+      for (const decisionText of decisionsToSave) {
+        await onSaveDecision({
+          decisionDate: preview.meetingDate || meetingDate || null,
+          owner: null,
+          status: "active",
+          text: decisionText,
+        });
+      }
+      for (const blockerText of blockersToSave) {
+        await onAddAction({
+          completionDate: null,
+          owner: null,
+          source: "memory",
+          status: "blocked",
+          title: blockerText,
+        });
+      }
+      setPreview((currentPreview) => {
+        if (!currentPreview) return currentPreview;
+        const nextPreview = {
+          ...currentPreview,
+          memorySuggestions: { blockers: [], decisions: [] },
+        };
+        return nextPreview.actions?.length ? nextPreview : null;
+      });
+      setSelectedDraftMemoryIds([]);
+      setExtractionStatus({
+        message: `${decisionsToSave.length + blockersToSave.length} memory updates added`,
+        tone: "success",
+      });
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : "Could not add memory updates.");
+    } finally {
+      setIsExtracting(false);
+    }
+  }
+
   async function handleConfirmDraftActions() {
     if (!preview?.actions?.length) return;
     const actionsToConfirm = preview.actions
@@ -2067,12 +3576,15 @@ function MeetingNotes({
       setExtractError("");
       const confirmedActions = await onConfirmExtractedActions(actionsToConfirm);
       setExtractionStatus({ message: `${confirmedActions.length} actions added`, tone: "success" });
-      setPreview((currentPreview) => ({
-        ...(currentPreview ?? preview),
-        actions: confirmedActions.map((action) => ({ ...action, draftId: makeDraftActionId() })),
-        actionsAdded: confirmedActions.length,
-        confirmed: true,
-      }));
+      setPreview(null);
+      setNotes("");
+      setUploadedFileName("");
+      setSelectedDraftActionIds([]);
+      setSelectedDraftMemoryIds([]);
+      setBulkDraftOwner("");
+      setBulkDraftDueDate("");
+      setEditingDraftActionId(null);
+      setEditingDraftSnapshot(null);
     } catch (error) {
       setExtractError(error instanceof Error ? error.message : "Could not add reviewed actions.");
     } finally {
@@ -2080,17 +3592,42 @@ function MeetingNotes({
     }
   }
 
+  const draftActions = preview?.actions ?? [];
+  const draftMemorySuggestions = preview?.memorySuggestions ?? { blockers: [], decisions: [] };
+  const draftMemorySuggestionCount =
+    (draftMemorySuggestions.decisions?.length ?? 0) + (draftMemorySuggestions.blockers?.length ?? 0);
+  const allDraftMemorySuggestionIds = [
+    ...(draftMemorySuggestions.decisions ?? []),
+    ...(draftMemorySuggestions.blockers ?? []),
+  ].map((item) => item.draftId);
+  const selectedDraftMemoryCount = selectedDraftMemoryIds.length;
+  const allDraftMemorySelected =
+    allDraftMemorySuggestionIds.length > 0 &&
+    allDraftMemorySuggestionIds.every((draftId) => selectedDraftMemoryIds.includes(draftId));
+  const selectedDraftActionCount = selectedDraftActionIds.length;
+  const allDraftActionsSelected =
+    draftActions.length > 0 && draftActions.every((action) => selectedDraftActionIds.includes(action.draftId));
+
   return (
     <div className="meeting-notes-stack">
-      <div className={`activity-grid ${preview ? "" : "single"}`}>
+      <div className={`activity-grid ${preview ? "with-preview" : "single"}`}>
         <section className="subsurface">
           <div className="section-title">
             <div>
               <h2>Meeting notes</h2>
             </div>
-            <button className="secondary-action" disabled={isExtracting} onClick={() => extractFromNotes("meeting")} type="button">
-              {isExtracting ? "Extracting" : "Extract"}
-            </button>
+            <div className="section-actions">
+              <button
+                aria-label="Add action from meeting notes"
+                className="primary-action compact"
+                onClick={() => setIsAddingMeetingAction(true)}
+                title="Add action"
+                type="button"
+              >
+                <PlusIcon />
+                Add Action
+              </button>
+            </div>
           </div>
           {extractionStatus ? (
             <p className={`extract-status ${extractionStatus.tone}`} role="status">
@@ -2098,16 +3635,55 @@ function MeetingNotes({
             </p>
           ) : null}
 
-          <label className="meeting-date-field">
-            Meeting date
-            <input
-              onChange={(event) => setMeetingDate(event.target.value)}
-              type="date"
-              value={meetingDate}
-            />
-          </label>
+          <div className="meeting-capture-panel">
+            <label className="meeting-date-field">
+              Meeting date
+              <input
+                onChange={(event) => setMeetingDate(event.target.value)}
+                type="date"
+                value={meetingDate}
+              />
+            </label>
 
-          <label>
+            <div className="meeting-template-row" aria-label="Meeting note templates">
+              <label className="meeting-template-field">
+                Template
+                <select
+                  aria-label="Meeting note template"
+                  onChange={(event) => {
+                    const selectedTemplate = meetingTemplates.find((template) => template.id === event.target.value);
+                    if (selectedTemplate) {
+                      handleMeetingTemplateSelect(selectedTemplate.text);
+                    }
+                    event.target.value = "";
+                  }}
+                  value=""
+                >
+                  <option value="">Choose template</option>
+                  {meetingTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="icon-action-button upload-icon-button" title="Upload notes">
+                <UploadIcon />
+                <input
+                  accept=".txt,.md,.markdown,.vtt,.srt,.json,text/plain,text/markdown,text/vtt,application/json"
+                  className="upload-input"
+                  onChange={handleCompanionNotesUpload}
+                  type="file"
+                />
+              </label>
+              <button className="primary-action compact" disabled={isExtracting} onClick={() => extractFromNotes("meeting")} type="button">
+                {isExtracting ? "Extracting" : "Extract"}
+              </button>
+              {uploadedFileName ? <span className="upload-file-name">{uploadedFileName}</span> : null}
+            </div>
+          </div>
+
+          <label className="notes-editor-field">
             Notes
             <textarea
               onChange={(event) => setNotes(event.target.value)}
@@ -2116,36 +3692,135 @@ function MeetingNotes({
               value={notes}
             />
           </label>
-
-          <div className="upload-row">
-            <label className="upload-box">
-              <span>Upload notes</span>
-              <strong>{uploadedFileName || "Choose text file"}</strong>
-              <input
-                accept=".txt,.md,.markdown,.vtt,.srt,.json,text/plain,text/markdown,text/vtt,application/json"
-                className="upload-input"
-                onChange={handleCompanionNotesUpload}
-                type="file"
-              />
-            </label>
-          </div>
           {uploadError ? <p className="upload-error" role="alert">{uploadError}</p> : null}
           {extractError ? <p className="upload-error" role="alert">{extractError}</p> : null}
         </section>
+
+        {isAddingMeetingAction ? (
+          <div className="modal-backdrop" role="presentation">
+            <section
+              aria-labelledby="meeting-action-title"
+              aria-modal="true"
+              className="confirmation-dialog action-create-dialog"
+              role="dialog"
+            >
+              <div>
+                <p className="eyebrow">Meeting notes</p>
+                <h2 id="meeting-action-title">Add action</h2>
+              </div>
+              <form className="stacked-form" onSubmit={handleMeetingActionSubmit}>
+                <label>
+                  Action item
+                  <input
+                    autoFocus
+                    onChange={(event) => setMeetingActionTitle(event.target.value)}
+                    placeholder="Follow up on launch checklist"
+                    value={meetingActionTitle}
+                  />
+                </label>
+                <label>
+                  Owner
+                  <select onChange={(event) => setMeetingActionOwner(event.target.value)} value={meetingActionOwner}>
+                    <option value="">Unassigned</option>
+                    {project.members.map((member) => (
+                      <option key={member} value={member}>
+                        {member}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Complete by
+                  <input
+                    onChange={(event) => setMeetingActionDueDate(event.target.value)}
+                    type="date"
+                    value={meetingActionDueDate}
+                  />
+                </label>
+                <div className="dialog-actions">
+                  <button className="secondary-action" onClick={cancelMeetingAction} type="button">
+                    Cancel
+                  </button>
+                  <button className="primary-action" disabled={!meetingActionTitle.trim()} type="submit">
+                    Add action
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        ) : null}
 
         {preview ? (
         <section className="subsurface">
           <div className="section-title">
             <div>
               <p className="eyebrow">Extraction result</p>
-              <h2>Extracted actions</h2>
+              <h2>{draftActions.length ? "Extracted actions" : "Suggested memory updates"}</h2>
             </div>
           </div>
             <article className="insight-card">
+              {draftActions.length ? (
               <div className="preview-section">
                 <span>Action items</span>
-                {preview.actions?.length ? (
                   <div className="extracted-action-list compact">
+                    {!preview.confirmed ? (
+                      <div className="draft-bulk-toolbar">
+                        <label className="inline-check draft-select-all">
+                          <input
+                            checked={allDraftActionsSelected}
+                            onChange={(event) => handleSelectAllDraftActions(event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span>Select all</span>
+                        </label>
+                        <span className="draft-selection-count">
+                          {selectedDraftActionCount ? `${selectedDraftActionCount} selected` : "No selection"}
+                        </span>
+                        <label>
+                          Owner
+                          <select
+                            disabled={!selectedDraftActionCount}
+                            onChange={(event) => {
+                              setBulkDraftOwner(event.target.value);
+                              applyOwnerToSelectedDraftActions(event.target.value);
+                            }}
+                            value={bulkDraftOwner}
+                          >
+                            <option value="">Unassigned</option>
+                            {project.members.map((member) => (
+                              <option key={member} value={member}>
+                                {member}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Due date
+                          <input
+                            disabled={!selectedDraftActionCount}
+                            onChange={(event) => {
+                              setBulkDraftDueDate(event.target.value);
+                              applyDateToSelectedDraftActions(event.target.value);
+                            }}
+                            type="date"
+                            value={bulkDraftDueDate}
+                          />
+                        </label>
+                        <button
+                          aria-label={`Delete selected draft actions${selectedDraftActionCount ? ` (${selectedDraftActionCount})` : ""}`}
+                          className="icon-action-button danger bulk-delete-button"
+                          disabled={!selectedDraftActionCount}
+                          onClick={handleDeleteSelectedDraftActions}
+                          title={selectedDraftActionCount ? `Delete ${selectedDraftActionCount} selected draft actions` : "Delete selected draft actions"}
+                          type="button"
+                        >
+                          <TrashIcon />
+                        </button>
+                        <button className="secondary-action quiet compact" onClick={handleDiscardDraftActions} type="button">
+                          Discard all
+                        </button>
+                      </div>
+                    ) : null}
                     {preview.actions.map((action) =>
                       preview.confirmed ? (
                         <div className="extracted-action-review-row confirmed" key={action.id ?? action.draftId}>
@@ -2221,7 +3896,20 @@ function MeetingNotes({
                         </div>
                       ) : (
                         <div className="extracted-action-review-row" key={action.draftId}>
-                          <strong>{action.title || "Untitled action"}</strong>
+                          <label className="action-select-control" title="Select draft action">
+                            <input
+                              checked={selectedDraftActionIds.includes(action.draftId)}
+                              onChange={(event) => handleSelectDraftAction(action.draftId, event.target.checked)}
+                              type="checkbox"
+                            />
+                          </label>
+                          <div className="draft-review-main">
+                            <strong>{action.title || "Untitled action"}</strong>
+                            <span>
+                              {action.owner || "Unassigned"}
+                              {action.completionDate ? ` · ${formatDisplayDate(action.completionDate)}` : ""}
+                            </span>
+                          </div>
                           <div className="draft-row-actions">
                             <button
                               aria-label={`Edit draft action ${action.title || "untitled"}`}
@@ -2246,9 +3934,6 @@ function MeetingNotes({
                       ),
                     )}
                   </div>
-                ) : (
-                  <p className="empty-state compact">No draft actions. Add one before confirming.</p>
-                )}
                 {preview.confirmed ? null : (
                   <div className="draft-action-toolbar">
                     <button className="secondary-action quiet" onClick={handleAddDraftAction} type="button">
@@ -2265,55 +3950,370 @@ function MeetingNotes({
                   </div>
                 )}
               </div>
+              ) : null}
+              {draftMemorySuggestionCount ? (
+                <div className="preview-section memory-suggestion-review">
+                  <span>Suggested memory updates</span>
+                  <div className="memory-suggestion-toolbar">
+                    <label className="inline-check draft-select-all">
+                      <input
+                        checked={allDraftMemorySelected}
+                        onChange={(event) => handleSelectAllMemorySuggestions(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>Select all</span>
+                    </label>
+                    <span className="draft-selection-count">
+                      {selectedDraftMemoryCount ? `${selectedDraftMemoryCount} selected` : "No selection"}
+                    </span>
+                    <button
+                      className="secondary-action quiet compact"
+                      disabled={!selectedDraftMemoryCount}
+                      onClick={handleDiscardSelectedMemorySuggestions}
+                      type="button"
+                    >
+                      Discard selected
+                    </button>
+                    <button className="secondary-action quiet compact" onClick={handleDiscardAllMemorySuggestions} type="button">
+                      Discard all
+                    </button>
+                  </div>
+                  <div className="memory-suggestion-list">
+                    {(draftMemorySuggestions.decisions ?? []).map((suggestion) => (
+                      <div className="memory-suggestion-row decision" key={suggestion.draftId}>
+                        <label className="action-select-control" title="Select suggested decision">
+                          <input
+                            checked={selectedDraftMemoryIds.includes(suggestion.draftId)}
+                            onChange={(event) => handleSelectMemorySuggestion(suggestion.draftId, event.target.checked)}
+                            type="checkbox"
+                          />
+                        </label>
+                        <span>Decision</span>
+                        <input
+                          aria-label="Suggested decision"
+                          onChange={(event) => handleMemorySuggestionChange("decisions", suggestion.draftId, event.target.value)}
+                          value={suggestion.text}
+                        />
+                        <button
+                          aria-label="Remove suggested decision"
+                          className="icon-action-button danger"
+                          onClick={() => handleDeleteMemorySuggestion("decisions", suggestion.draftId)}
+                          title="Remove"
+                          type="button"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
+                    ))}
+                    {(draftMemorySuggestions.blockers ?? []).map((suggestion) => (
+                      <div className="memory-suggestion-row blocker" key={suggestion.draftId}>
+                        <label className="action-select-control" title="Select suggested blocker">
+                          <input
+                            checked={selectedDraftMemoryIds.includes(suggestion.draftId)}
+                            onChange={(event) => handleSelectMemorySuggestion(suggestion.draftId, event.target.checked)}
+                            type="checkbox"
+                          />
+                        </label>
+                        <span>Blocker</span>
+                        <input
+                          aria-label="Suggested blocker"
+                          onChange={(event) => handleMemorySuggestionChange("blockers", suggestion.draftId, event.target.value)}
+                          value={suggestion.text}
+                        />
+                        <button
+                          aria-label="Remove suggested blocker"
+                          className="icon-action-button danger"
+                          onClick={() => handleDeleteMemorySuggestion("blockers", suggestion.draftId)}
+                          title="Remove"
+                          type="button"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="draft-action-toolbar">
+                    <button
+                      className="primary-action"
+                      disabled={isExtracting || !draftMemorySuggestionCount}
+                      onClick={handleConfirmMemorySuggestions}
+                      type="button"
+                    >
+                      Add memory updates
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {preview.actionsAdded ? <p>{preview.actionsAdded} action items were added.</p> : null}
             </article>
         </section>
         ) : null}
       </div>
 
-      <section className="subsurface collapsible-feed">
-        <button
-          aria-expanded={isFeedExpanded}
-          className="feed-toggle"
-          onClick={() => setIsFeedExpanded((expanded) => !expanded)}
-          type="button"
-        >
-          <span>
-            <strong>Project notes</strong>
-            <em>{updates.length}</em>
-          </span>
-          <span>{isFeedExpanded ? "Collapse" : "Expand"}</span>
-        </button>
-        {isFeedExpanded ? (
-          <div className="feed-content">
-            <div className="note-search-row">
-              <label>
-                Search notes
-                <input
-                  onChange={(event) => setNoteSearch(event.target.value)}
-                  placeholder="Search project notes"
-                  type="search"
-                  value={noteSearch}
-                />
-              </label>
-              {noteSearch ? (
-                <button
-                  aria-label="Clear project notes search"
-                  className="icon-action-button"
-                  onClick={() => setNoteSearch("")}
-                  title="Clear search"
-                  type="button"
-                >
-                  <XIcon />
-                </button>
-              ) : null}
-              <span>
-                {filteredUpdates.length} of {updates.length}
-              </span>
+      <section className="subsurface project-memory">
+        <div className="project-memory-title">
+          <h2>Project memory</h2>
+        </div>
+        <div className="memory-tabs" role="tablist" aria-label="Project memory">
+          <button
+            aria-selected={memoryTab === "decisions"}
+            className={`memory-tab ${memoryTab === "decisions" ? "active" : ""}`}
+            onClick={() => setMemoryTab("decisions")}
+            role="tab"
+            type="button"
+          >
+            Decision log <em>{decisions.length}</em>
+          </button>
+          <button
+            aria-selected={memoryTab === "notes"}
+            className={`memory-tab ${memoryTab === "notes" ? "active" : ""}`}
+            onClick={() => setMemoryTab("notes")}
+            role="tab"
+            type="button"
+          >
+            Project notes <em>{updates.length}</em>
+          </button>
+        </div>
+
+        {memoryTab === "decisions" ? (
+          <div className="memory-section decision-log" role="tabpanel">
+            <div className="memory-section-header">
+              <button
+                aria-expanded={isDecisionLogExpanded}
+                className="feed-toggle"
+                onClick={() => setIsDecisionLogExpanded((expanded) => !expanded)}
+                type="button"
+              >
+                <span>
+                  <strong>Decision log</strong>
+                  <em>{decisions.length}</em>
+                </span>
+                <span>{isDecisionLogExpanded ? "Collapse" : "Expand"}</span>
+              </button>
+              <button
+                aria-expanded={isAddingDecision}
+                aria-label="Add decision"
+                className="icon-action-button add-decision-button"
+                onClick={() => {
+                  setIsAddingDecision((isAdding) => !isAdding);
+                  setIsDecisionLogExpanded(true);
+                  cancelDecisionEdit();
+                }}
+                title="Add decision"
+                type="button"
+              >
+                <PlusIcon />
+              </button>
             </div>
+            {isDecisionLogExpanded ? (
+              <div className="feed-content">
+                <div className="filter-row decision-filter-row">
+                  <label className="compact-filter">
+                    Owner
+                    <select onChange={(event) => setDecisionOwnerFilter(event.target.value)} value={decisionOwnerFilter}>
+                      <option value="all">All</option>
+                      {decisionOwnerOptions.map((owner) => (
+                        <option key={owner} value={owner}>
+                          {owner}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <DecisionStatusDots allowAll label="Status" onChange={setDecisionStatusFilter} value={decisionStatusFilter} />
+                  <label className="compact-filter date-filter">
+                    From
+                    <input onChange={(event) => setDecisionDateFromFilter(event.target.value)} type="date" value={decisionDateFromFilter} />
+                  </label>
+                  <label className="compact-filter date-filter">
+                    To
+                    <input onChange={(event) => setDecisionDateToFilter(event.target.value)} type="date" value={decisionDateToFilter} />
+                  </label>
+                  <button
+                    aria-label="Clear decision filters"
+                    className="icon-action-button board-clear-filter-button"
+                    disabled={!hasDecisionFilters}
+                    onClick={() => {
+                      setDecisionOwnerFilter("all");
+                      setDecisionStatusFilter("all");
+                      setDecisionDateFromFilter("");
+                      setDecisionDateToFilter("");
+                    }}
+                    title="Clear filters"
+                    type="button"
+                  >
+                    <XIcon />
+                  </button>
+                </div>
+                {isAddingDecision ? (
+                  <form className="decision-edit-form" onSubmit={handleDecisionSubmit}>
+                    <label>
+                      Date
+                      <input
+                        onChange={(event) => setNewDecisionDate(event.target.value)}
+                        type="date"
+                        value={newDecisionDate}
+                      />
+                    </label>
+                    <label>
+                      Decision
+                      <input
+                        autoFocus
+                        onChange={(event) => setNewDecisionText(event.target.value)}
+                        placeholder="Capture the decision"
+                        value={newDecisionText}
+                      />
+                    </label>
+                    <label>
+                      Owner / approver
+                      <select onChange={(event) => setNewDecisionOwner(event.target.value)} value={newDecisionOwner}>
+                        <option value="">Unassigned</option>
+                        {project.members.map((member) => (
+                          <option key={member} value={member}>
+                            {member}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <DecisionStatusDots onChange={setNewDecisionStatus} value={newDecisionStatus} />
+                    <div className="icon-form-actions">
+                      <button aria-label="Save decision" className="icon-action-button confirm" title="Save" type="submit">
+                        <CheckIcon />
+                      </button>
+                      <button
+                        aria-label="Cancel decision"
+                        className="icon-action-button"
+                        onClick={() => {
+                          setIsAddingDecision(false);
+                          setNewDecisionText("");
+                          setNewDecisionDate(todayDateInputValue());
+                          setNewDecisionOwner("");
+                          setNewDecisionStatus("active");
+                        }}
+                        title="Cancel"
+                        type="button"
+                      >
+                        <XIcon />
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
+                {filteredDecisions.length ? (
+                  <div className="decision-list">
+                    {filteredDecisions.map((decision) => (
+                      <article className="decision-item" key={decision.id}>
+                        {editingDecisionId === decision.id ? (
+                          <form className="decision-edit-form inline" onSubmit={handleDecisionUpdate}>
+                            <label>
+                              Date
+                              <input
+                                onChange={(event) => setEditingDecisionDate(event.target.value)}
+                                type="date"
+                                value={editingDecisionDate}
+                              />
+                            </label>
+                            <label>
+                              Decision
+                              <input
+                                onChange={(event) => setEditingDecisionText(event.target.value)}
+                                value={editingDecisionText}
+                              />
+                            </label>
+                            <label>
+                              Owner / approver
+                              <select onChange={(event) => setEditingDecisionOwner(event.target.value)} value={editingDecisionOwner}>
+                                <option value="">Unassigned</option>
+                                {project.members.map((member) => (
+                                  <option key={member} value={member}>
+                                    {member}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <DecisionStatusDots onChange={setEditingDecisionStatus} value={editingDecisionStatus} />
+                            <div className="icon-form-actions">
+                              <button aria-label="Save decision edit" className="icon-action-button confirm" title="Save" type="submit">
+                                <CheckIcon />
+                              </button>
+                              <button
+                                aria-label="Cancel decision edit"
+                                className="icon-action-button"
+                                onClick={cancelDecisionEdit}
+                                title="Cancel"
+                                type="button"
+                              >
+                                <XIcon />
+                              </button>
+                            </div>
+                          </form>
+                        ) : (
+                          <>
+                            <div>
+                              <strong>{decision.decisionDate ? formatDisplayDate(decision.decisionDate) : "Decision"}</strong>
+                              <div className="decision-meta-row">
+                                <span>{decision.owner || "Unassigned"}</span>
+                                <span className={`decision-status-inline ${decision.status || "active"}`}>
+                                  <i aria-hidden="true" />
+                                  {labelForClassification(decision.status || "active")}
+                                </span>
+                              </div>
+                              <p>{decision.text}</p>
+                            </div>
+                            <span className="decision-actions">
+                              <button
+                                aria-label="Edit decision"
+                                className="action-edit-button"
+                                onClick={() => beginDecisionEdit(decision)}
+                                title="Edit decision"
+                                type="button"
+                              >
+                                <EditIcon />
+                              </button>
+                              <button
+                                aria-label="Delete decision"
+                                className="action-delete-button"
+                                onClick={() => onDeleteDecision(decision)}
+                                title="Delete decision"
+                                type="button"
+                              >
+                                <TrashIcon />
+                              </button>
+                            </span>
+                          </>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="empty-state compact">
+                    {decisions.length
+                      ? "No decisions match the selected filters."
+                      : "Decisions with words like decided, agreed, approved, or confirmed will appear here."}
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {memoryTab === "notes" ? (
+          <div className="memory-section project-notes-section" role="tabpanel">
+          <button
+            aria-expanded={isFeedExpanded}
+            className="feed-toggle"
+            onClick={() => setIsFeedExpanded((expanded) => !expanded)}
+            type="button"
+          >
+            <span>
+              <strong>Project notes</strong>
+              <em>{updates.length}</em>
+            </span>
+            <span>{isFeedExpanded ? "Collapse" : "Expand"}</span>
+          </button>
+          {isFeedExpanded ? (
+            <div className="feed-content">
             <div className="updates-feed">
-              {filteredUpdates.length ? (
-                filteredUpdates.map((update) => (
+              {updates.length ? (
+                updates.map((update) => (
                 <article className="update-card" key={update.id}>
                   <div className="card-row">
                     <strong>
@@ -2381,28 +4381,78 @@ function MeetingNotes({
               ))
             ) : (
               <p className="empty-state">
-                {updates.length
-                  ? "No project notes match this search."
-                  : "No project notes yet. Paste meeting notes above and extract actions; the notes will be saved here."}
+                No project notes yet. Paste meeting notes above and extract actions; the notes will be saved here.
               </p>
             )}
             </div>
-          </div>
+            </div>
+          ) : null}
+        </div>
         ) : null}
       </section>
     </div>
   );
 }
 
-function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }) {
+function ProjectMemoryLane({ actions, decisions, updates }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const items = projectMemoryItems({ actions, decisions, updates });
+
+  return (
+    <section className="overview-section memory-lane-section">
+      <div className="overview-section-heading compact">
+        <div>
+          <h2>Memory lane</h2>
+          <p>{updates.length} notes · {decisions.length} decisions · {actions.length} actions</p>
+        </div>
+        <button
+          aria-expanded={isExpanded}
+          className="secondary-action compact"
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+          type="button"
+        >
+          {isExpanded ? "Collapse" : "Expand"}
+        </button>
+      </div>
+
+      {isExpanded ? (
+        items.length ? (
+          <div className="memory-lane-list">
+            {items.map((item) => (
+              <article className={`memory-lane-item ${item.tone}`} key={item.id}>
+                <span className="memory-lane-dot" aria-hidden="true" />
+                <div>
+                  <div className="memory-lane-meta">
+                    <strong>{item.type}</strong>
+                    <span>{item.date ? formatDisplayDate(item.date) : "No date"}</span>
+                    <span>{item.meta}</span>
+                  </div>
+                  <p>{item.text}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state compact">Add notes, decisions, or actions to build project memory.</p>
+        )
+      ) : (
+        <p className="memory-lane-summary">
+          Expand to review the latest project notes, decisions, and action activity in one place.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function BugDb({ bugs, lastRefreshedAt, onAddAction, project, refreshError, selectedColumns }) {
   const [sortByProject, setSortByProject] = useState({});
   const availableColumns = useMemo(() => orderedBugColumns(bugs), [bugs]);
   const availableColumnsKey = availableColumns.join("\u001f");
   const sortState = sortByProject?.[project.id] ?? { column: "", direction: "asc" };
   const bugGridStyle = selectedColumns.length
     ? {
-        gridTemplateColumns: bugGridTemplate(selectedColumns),
-        minWidth: selectedColumns.length > 4 ? `${selectedColumns.length * 126}px` : "100%",
+        gridTemplateColumns: `${bugGridTemplate(selectedColumns)} minmax(96px, 0.65fr)`,
+        minWidth: selectedColumns.length > 4 ? `${selectedColumns.length * 128 + 96}px` : "100%",
       }
     : undefined;
 
@@ -2425,6 +4475,22 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
         return sortState.direction === "desc" ? -comparison : comparison;
       })
     : bugs;
+  const bugInsightItems = [
+    ["Severity", "severity"],
+    ["Status", "status"],
+    ["Assignee", "assignee"],
+    ["Component", "component"],
+  ].map(([label, field]) => {
+    const counts = bugs.reduce((collection, bug) => {
+      const value = bugFieldValue(bug, field) || "Unassigned";
+      collection.set(value, (collection.get(value) ?? 0) + 1);
+      return collection;
+    }, new Map());
+    const topValues = Array.from(counts.entries())
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 3);
+    return { label, topValues };
+  });
 
   function handleSortBugReport(column) {
     setSortByProject((currentSortByProject) => {
@@ -2435,6 +4501,19 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
       const currentSort = safeSortByProject[project.id] ?? { column: "", direction: "asc" };
       const nextDirection = currentSort.column === column && currentSort.direction === "asc" ? "desc" : "asc";
       return { ...safeSortByProject, [project.id]: { column, direction: nextDirection } };
+    });
+  }
+
+  async function handleCreateActionFromBug(bug) {
+    const bugNumber = bugFieldValue(bug, "rptno") || bug.id;
+    const subject = bugFieldValue(bug, "subject") || bug.title || "Bug follow-up";
+    const assignee = bugFieldValue(bug, "assignee") || "";
+    await onAddAction({
+      completionDate: null,
+      owner: assignee && assignee !== "—" ? assignee : null,
+      source: "bug",
+      status: "active",
+      title: `Bug ${bugNumber}: ${subject}`,
     });
   }
 
@@ -2456,6 +4535,15 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
       {lastRefreshedAt ? <p className="refresh-status">Last refreshed {lastRefreshedAt}</p> : null}
       {refreshError ? <p className="refresh-error" role="alert">{refreshError}</p> : null}
 
+      <section className="bug-insight-panel" aria-label="BugDB insights">
+        {bugInsightItems.map((item) => (
+          <article key={item.label}>
+            <strong>{item.label}</strong>
+            <span>{item.topValues.map(([value, count]) => `${value}: ${count}`).join(" · ") || "No data"}</span>
+          </article>
+        ))}
+      </section>
+
       <div className="bug-list">
         {sortedBugs.length && selectedColumns.length ? (
           <>
@@ -2472,6 +4560,7 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
                   {sortState.column === column ? <span aria-hidden="true">{sortState.direction === "asc" ? "↑" : "↓"}</span> : null}
                 </button>
               ))}
+              <span className="bug-action-header">Add Action</span>
             </div>
             {sortedBugs.map((bug) => (
               <article className="bug-card" key={bug.id} style={bugGridStyle}>
@@ -2479,6 +4568,15 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
                   const value = bugFieldValue(bug, column) || "—";
                   return <span key={column} title={String(value)}>{value}</span>;
                 })}
+                <button
+                  aria-label={`Add action for bug ${bugFieldValue(bug, "rptno") || bug.id}`}
+                  className="icon-action-button bug-row-action-button"
+                  onClick={() => handleCreateActionFromBug(bug)}
+                  title="Add action"
+                  type="button"
+                >
+                  <PlusIcon />
+                </button>
               </article>
             ))}
           </>
@@ -2494,6 +4592,227 @@ function BugDb({ bugs, lastRefreshedAt, project, refreshError, selectedColumns }
   );
 }
 
+function DashboardLevelView({
+  actions,
+  followUpError,
+  followUps,
+  isFollowUpLoading,
+  onCreateFollowUpAction,
+  onRefreshFollowUps,
+  projects,
+  updates,
+}) {
+  const [projectFilterId, setProjectFilterId] = useState("all");
+  const activeProjects = projects.filter((project) => !project.archivedAt);
+  const scopedProjects =
+    projectFilterId === "all"
+      ? activeProjects
+      : activeProjects.filter((project) => String(project.id) === projectFilterId);
+  const scopedProjectIds = new Set(scopedProjects.map((project) => String(project.id)));
+  const activeActions = actions.filter((action) => scopedProjectIds.has(String(action.projectId)));
+  const projectById = new Map(activeProjects.map((project) => [String(project.id), project]));
+  const dueSoonActions = activeActions
+    .filter((action) => {
+      const dueDetails = dueDateDetails(action);
+      return dueDetails && ["overdue", "today", "soon"].includes(dueDetails.tone) && action.status !== "done";
+    })
+    .sort(compareActionsByDueDateAndStatus)
+    .slice(0, 8);
+  const blockedActions = activeActions
+    .filter((action) => action.status === "blocked")
+    .sort(compareActionsByDueDateAndStatus)
+    .slice(0, 8);
+  const atRiskProjects = activeProjects
+    .filter((project) => scopedProjectIds.has(String(project.id)))
+    .map((project) => {
+      const projectActions = activeActions.filter((action) => String(action.projectId) === String(project.id));
+      const blockedCount = projectActions.filter((action) => action.status === "blocked").length;
+      const overdueCount = projectActions.filter((action) => dueDateDetails(action)?.tone === "overdue").length;
+      return { project, blockedCount, overdueCount, score: blockedCount + overdueCount };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 6);
+  const healthRank = { red: 0, yellow: 1, green: 2 };
+  const projectHealthRows = scopedProjects
+    .map((project) => {
+      const projectActions = activeActions.filter((action) => String(action.projectId) === String(project.id));
+      const projectUpdates = updates.filter((update) => String(update.projectId) === String(project.id));
+      return { project, health: projectHealth(projectActions, projectUpdates) };
+    })
+    .sort((left, right) =>
+      (healthRank[left.health.tone] ?? 9) - (healthRank[right.health.tone] ?? 9) ||
+      left.project.name.localeCompare(right.project.name),
+    )
+    .slice(0, 8);
+  const ownerWorkload = Array.from(
+    activeActions
+      .filter((action) => action.status !== "done")
+      .reduce((owners, action) => {
+        const owner = action.owner || "Unassigned";
+        const current = owners.get(owner) ?? { owner, active: 0, blocked: 0, overdue: 0 };
+        current.active += 1;
+        if (action.status === "blocked") current.blocked += 1;
+        if (dueDateDetails(action)?.tone === "overdue") current.overdue += 1;
+        owners.set(owner, current);
+        return owners;
+      }, new Map())
+      .values(),
+  )
+    .sort((left, right) => right.overdue - left.overdue || right.blocked - left.blocked || right.active - left.active)
+    .slice(0, 8);
+  const scopedFollowUps = followUps
+    .filter((item) => scopedProjectIds.has(String(item.projectId)))
+    .slice(0, 6);
+
+  function projectName(projectId) {
+    return projectById.get(String(projectId))?.name ?? "Unknown project";
+  }
+
+  return (
+    <section className="surface dashboard-preview all-projects-view">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">All projects</p>
+          <h2>Portfolio dashboard</h2>
+        </div>
+        <label className="portfolio-filter">
+          Project
+          <select onChange={(event) => setProjectFilterId(event.target.value)} value={projectFilterId}>
+            <option value="all">All active projects</option>
+            {activeProjects.map((project) => (
+              <option key={project.id} value={String(project.id)}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="portfolio-grid">
+        <section className="portfolio-panel portfolio-health">
+          <h3>Project health</h3>
+          {projectHealthRows.length ? (
+            projectHealthRows.map(({ project, health }) => (
+              <article className="portfolio-item health-row" key={project.id}>
+                <strong>{project.name}</strong>
+                <span className={`health-dot ${health.tone}`} aria-label={health.label} />
+                <span>{health.label} · {health.reason}</span>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">No active projects to monitor.</p>
+          )}
+        </section>
+
+        <section className="portfolio-panel portfolio-due">
+          <h3>Due soon</h3>
+          {dueSoonActions.length ? (
+            dueSoonActions.map((action) => (
+              <article className="portfolio-item" key={action.id}>
+                <strong>{action.title}</strong>
+                <span>{projectName(action.projectId)} · {action.owner || "Unassigned"}</span>
+                <div className="portfolio-item-tags">
+                  <ActionDueIndicator action={action} />
+                  <ActionAgeIndicator action={action} />
+                </div>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">No active actions are due this week.</p>
+          )}
+        </section>
+
+        <section className="portfolio-panel portfolio-blocked">
+          <h3>Blocked work</h3>
+          {blockedActions.length ? (
+            blockedActions.map((action) => (
+              <article className="portfolio-item" key={action.id}>
+                <strong>{action.title}</strong>
+                <span>{projectName(action.projectId)} · {action.owner || "Unassigned"}</span>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">No blocked work across active projects.</p>
+          )}
+        </section>
+
+        <section className="portfolio-panel portfolio-risk">
+          <h3>Projects at risk</h3>
+          {atRiskProjects.length ? (
+            atRiskProjects.map(({ project, blockedCount, overdueCount }) => (
+              <article className="portfolio-item" key={project.id}>
+                <strong>{project.name}</strong>
+                <span>{blockedCount} blocked · {overdueCount} overdue</span>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">No active projects are currently at risk.</p>
+          )}
+        </section>
+
+        <section className="portfolio-panel portfolio-workload">
+          <h3>Owner workload</h3>
+          {ownerWorkload.length ? (
+            ownerWorkload.map((owner) => (
+              <article className="portfolio-item workload-item" key={owner.owner}>
+                <strong>{owner.owner}</strong>
+                <span>{owner.active} active · {owner.blocked} blocked · {owner.overdue} overdue</span>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">No open actions across active projects.</p>
+          )}
+        </section>
+
+        <section className="portfolio-panel portfolio-followup">
+          <div className="portfolio-panel-heading">
+            <h3>Needs follow-up</h3>
+            <button
+              aria-label="Refresh follow-up detection"
+              className="icon-action-button compact-icon-button"
+              disabled={isFollowUpLoading}
+              onClick={onRefreshFollowUps}
+              title="Refresh"
+              type="button"
+            >
+              <SearchIcon />
+            </button>
+          </div>
+          {isFollowUpLoading ? (
+            <p className="empty-state">Checking unresolved topics...</p>
+          ) : scopedFollowUps.length ? (
+            scopedFollowUps.map((item) => (
+              <article className="portfolio-item followup-item" key={`${item.projectId}-${item.topic}`}>
+                <strong>{item.topic}</strong>
+                <span>{item.projectName || projectName(item.projectId)} · {item.signal}</span>
+                {item.flags?.length ? (
+                  <div className="portfolio-item-tags followup-flags">
+                    {item.flags.slice(0, 3).map((flag) => (
+                      <span className="meta-pill" key={flag}>{followUpFlagLabel(flag)}</span>
+                    ))}
+                  </div>
+                ) : null}
+                <button
+                  className="secondary-action compact-followup-button"
+                  onClick={() => onCreateFollowUpAction(item)}
+                  type="button"
+                >
+                  {item.actionId ? "View action" : "Create action"}
+                </button>
+              </article>
+            ))
+          ) : (
+            <p className="empty-state">
+              {followUpError || "No unresolved follow-ups detected yet."}
+            </p>
+          )}
+        </section>
+      </div>
+    </section>
+  );
+}
+
 function DashboardPanel({
   activeTab,
   actions,
@@ -2501,37 +4820,68 @@ function DashboardPanel({
   bugLastRefreshedAt,
   bugReportVisible,
   bugRefreshError,
+  decisions,
+  phases,
+  projectLinks,
   onActionTitleChange,
   onAddAction,
   onCleanDuplicates,
   onClearBugs,
   onCompletionDateChange,
   onConfirmExtractedActions,
+  onDeleteDecision,
+  onDeletePhase,
+  onDeletePhaseItem,
+  onDeleteProjectLink,
   onDeleteAction,
   onDeleteActions,
   onDeleteProjectNote,
   onExtractActions,
+  onMovePhase,
+  onMovePhaseItem,
+  onReorderPhaseItems,
+  onReorderPhases,
   onOwnerChange,
+  onCreatePhase,
+  onCreatePhaseItem,
+  onCreateProjectLink,
+  onSaveDecision,
   onSaveProjectNote,
   onStatusChange,
+  onTabChange,
+  onUpdatePhase,
+  onUpdatePhaseItem,
+  onUpdateProjectDetails,
+  onUpdateProjectLink,
+  onUpdateDecision,
   onUpdateProjectNote,
   project,
   selectedBugColumns,
   updates,
 }) {
-  if (activeTab === "people") {
+  if (activeTab === "overview") {
     return (
-      <ActionsByPerson
+      <ProjectOverview
         actions={actions}
-        onActionTitleChange={onActionTitleChange}
-        onAddAction={onAddAction}
-        onCleanDuplicates={onCleanDuplicates}
-        onCompletionDateChange={onCompletionDateChange}
-        onDeleteAction={onDeleteAction}
-        onDeleteActions={onDeleteActions}
-        onOwnerChange={onOwnerChange}
-        onStatusChange={onStatusChange}
+        decisions={decisions}
+        onCreatePhase={onCreatePhase}
+        onCreatePhaseItem={onCreatePhaseItem}
+        onCreateProjectLink={onCreateProjectLink}
+        onDeletePhase={onDeletePhase}
+        onDeletePhaseItem={onDeletePhaseItem}
+        onDeleteProjectLink={onDeleteProjectLink}
+        onMovePhase={onMovePhase}
+        onMovePhaseItem={onMovePhaseItem}
+        onReorderPhaseItems={onReorderPhaseItems}
+        onReorderPhases={onReorderPhases}
+        onUpdatePhase={onUpdatePhase}
+        onUpdatePhaseItem={onUpdatePhaseItem}
+        onUpdateProjectDetails={onUpdateProjectDetails}
+        onUpdateProjectLink={onUpdateProjectLink}
+        phases={phases}
         project={project}
+        projectLinks={projectLinks}
+        updates={updates}
       />
     );
   }
@@ -2540,10 +4890,15 @@ function DashboardPanel({
     return (
       <MeetingNotes
         onConfirmExtractedActions={onConfirmExtractedActions}
+        onAddAction={onAddAction}
+        onDeleteDecision={onDeleteDecision}
         onDeleteProjectNote={onDeleteProjectNote}
         onExtractActions={onExtractActions}
+        onSaveDecision={onSaveDecision}
         onSaveProjectNote={onSaveProjectNote}
+        onUpdateDecision={onUpdateDecision}
         onUpdateProjectNote={onUpdateProjectNote}
+        decisions={decisions}
         project={project}
         updates={updates}
       />
@@ -2557,6 +4912,7 @@ function DashboardPanel({
       <BugDb
         bugs={bugs}
         lastRefreshedAt={bugLastRefreshedAt}
+        onAddAction={onAddAction}
         project={project}
         refreshError={bugRefreshError}
         selectedColumns={selectedBugColumns}
@@ -2568,9 +4924,11 @@ function DashboardPanel({
     <StatusBoard
       actions={actions}
       onActionTitleChange={onActionTitleChange}
+      onAddAction={onAddAction}
       onCleanDuplicates={onCleanDuplicates}
-      onDeleteAction={onDeleteAction}
       onCompletionDateChange={onCompletionDateChange}
+      onDeleteAction={onDeleteAction}
+      onDeleteActions={onDeleteActions}
       onOwnerChange={onOwnerChange}
       onStatusChange={onStatusChange}
       project={project}
@@ -2583,8 +4941,13 @@ function DashboardShell({
   actions,
   bugs,
   bugQueries = [],
+  phases = [],
+  projectLinks = [],
   onActionTitleChange,
   onAddAction,
+  onCreatePhase,
+  onCreatePhaseItem,
+  onCreateProjectLink,
   onCreateBugQuery,
   onCleanDuplicates,
   onCompletionDateChange,
@@ -2593,18 +4956,33 @@ function DashboardShell({
   onDeleteBugQuery,
   onDeleteAction,
   onDeleteActions,
+  onDeleteDecision,
+  onDeletePhase,
+  onDeletePhaseItem,
+  onDeleteProjectLink,
   onDeleteProjectNote,
   onExtractActions,
+  onMovePhase,
+  onMovePhaseItem,
+  onReorderPhaseItems,
+  onReorderPhases,
   onOwnerChange,
   onRefreshBugs,
   onUploadBugs,
+  onSaveDecision,
   onSaveProjectNote,
   onStatusChange,
   onTabChange,
+  onUpdatePhase,
+  onUpdatePhaseItem,
+  onUpdateProjectDetails,
+  onUpdateProjectLink,
   onUpdateBugQuery,
+  onUpdateDecision,
   onUpdateProjectNote,
   project,
   updates,
+  decisions,
 }) {
   const [bugQuery, setBugQuery] = useState(emptyBugQuery);
   const [selectedBugQueryId, setSelectedBugQueryId] = useState("");
@@ -2613,6 +4991,7 @@ function DashboardShell({
   const [isBugColumnPickerOpen, setIsBugColumnPickerOpen] = useState(false);
   const bugColumnPickerRef = useRef(null);
   const [bugLastRefreshedAt, setBugLastRefreshedAt] = useState("");
+  const [isBugReportVisible, setIsBugReportVisible] = useState(false);
   const [bugRefreshError, setBugRefreshError] = useState("");
   const [isBugRefreshing, setIsBugRefreshing] = useState(false);
   const [isBugUploading, setIsBugUploading] = useState(false);
@@ -2622,7 +5001,18 @@ function DashboardShell({
   const availableBugColumns = useMemo(() => orderedBugColumns(bugs), [bugs]);
   const availableBugColumnsKey = availableBugColumns.join("\u001f");
   const savedReportColumns = reportColumnsByProject?.[project.id];
-  const selectedBugColumns = Array.isArray(savedReportColumns) ? savedReportColumns : defaultBugColumns(availableBugColumns);
+  const selectedBugColumns = Array.isArray(savedReportColumns)
+    ? orderBugColumnsForReport(savedReportColumns, availableBugColumns)
+    : defaultBugColumns(availableBugColumns);
+
+  useEffect(() => {
+    setBugLastRefreshedAt("");
+    setBugRefreshError("");
+    setIsBugReportVisible(false);
+    setSelectedBugQueryId("");
+    setBugQueryName("");
+    setBugQuery(emptyBugQuery);
+  }, [project.id]);
 
   useEffect(() => {
     setReportColumnsByProject((currentColumnsByProject) => {
@@ -2631,7 +5021,7 @@ function DashboardShell({
           ? currentColumnsByProject
           : {};
       const currentColumns = Array.isArray(safeColumnsByProject[project.id]) ? safeColumnsByProject[project.id] : [];
-      const stillAvailable = currentColumns.filter((column) => availableBugColumns.includes(column));
+      const stillAvailable = orderBugColumnsForReport(currentColumns, availableBugColumns);
       const nextColumns = stillAvailable.length ? stillAvailable : defaultBugColumns(availableBugColumns);
       if (currentColumns.join("\u001f") === nextColumns.join("\u001f")) return safeColumnsByProject;
       return { ...safeColumnsByProject, [project.id]: nextColumns };
@@ -2652,6 +5042,7 @@ function DashboardShell({
 
   function updateBugQuery(field, value) {
     setBugQuery((currentQuery) => ({ ...currentQuery, [field]: value }));
+    setIsBugReportVisible(false);
   }
 
   function handleReportColumnToggle(column) {
@@ -2677,14 +5068,19 @@ function DashboardShell({
       setBugQueryName(savedQuery.name);
       setBugQuery({ ...emptyBugQuery, ...savedQuery.query });
     } else {
+      setBugQuery(emptyBugQuery);
       setBugQueryName("");
     }
+    setIsBugReportVisible(false);
+    setBugLastRefreshedAt("");
   }
 
   function handleNewBugQuery() {
     setSelectedBugQueryId("");
     setBugQueryName("");
     setBugQuery(emptyBugQuery);
+    setIsBugReportVisible(false);
+    setBugLastRefreshedAt("");
   }
 
   async function handleSaveBugQuery() {
@@ -2725,8 +5121,11 @@ function DashboardShell({
     setBugRefreshError("");
 
     try {
-      await onRefreshBugs(project.id, bugQuery);
-      setBugLastRefreshedAt(new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+      const refreshedBugs = await onRefreshBugs(project.id, bugQuery);
+      const refreshedAt = new Date();
+      setBugLastRefreshedAt(refreshedAt.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+      setIsBugReportVisible(true);
+      return refreshedBugs;
     } catch (error) {
       setBugRefreshError(error instanceof Error ? error.message : "Could not refresh bugs.");
     } finally {
@@ -2746,6 +5145,7 @@ function DashboardShell({
       const contentBase64 = await fileToBase64(file);
       await onUploadBugs(project.id, { filename: file.name, contentBase64 });
       setBugLastRefreshedAt(new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+      setIsBugReportVisible(true);
     } catch (error) {
       setBugRefreshError(error instanceof Error ? error.message : "Could not import bugs from the file.");
     } finally {
@@ -2761,101 +5161,15 @@ function DashboardShell({
       {activeTab === "bugs" ? (
         <div className="section-title bug-header-only">
           <div className="bug-header-controls">
-            <form className="bug-query-form" onSubmit={handleRefreshBugs}>
-              <label>
-                <span>Product ID</span>
-                <input
-                  aria-label="Product ID"
-                  inputMode="numeric"
-                  onChange={(event) => updateBugQuery("productId", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.productId}
-                />
-              </label>
-              <label>
-                <span>Bug No</span>
-                <input
-                  aria-label="Bug No"
-                  onChange={(event) => updateBugQuery("rptno", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.rptno}
-                />
-              </label>
-              <label>
-                <span>Status</span>
-                <input
-                  aria-label="Status"
-                  onChange={(event) => updateBugQuery("status", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.status}
-                />
-              </label>
-              <label>
-                <span>Severity</span>
-                <input
-                  aria-label="Severity"
-                  onChange={(event) => updateBugQuery("severity", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.severity}
-                />
-              </label>
-              <label>
-                <span>Reported by</span>
-                <input
-                  aria-label="Reported by"
-                  onChange={(event) => updateBugQuery("reportedBy", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.reportedBy}
-                />
-              </label>
-              <label>
-                <span>Component</span>
-                <input
-                  aria-label="Component"
-                  onChange={(event) => updateBugQuery("component", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.component}
-                />
-              </label>
-              <label>
-                <span>Assignee</span>
-                <input
-                  aria-label="Assignee"
-                  onChange={(event) => updateBugQuery("assignee", event.target.value)}
-                  placeholder="Any"
-                  value={bugQuery.assignee}
-                />
-              </label>
-              <button
-                aria-label={isBugRefreshing ? "Refreshing Bug DB report" : "Search Bug DB"}
-                className="bug-query-icon-button primary"
-                disabled={!hasBugQuery || isBugRefreshing}
-                title={isBugRefreshing ? "Refreshing" : "Search"}
-                type="submit"
-              >
-                <SearchIcon />
-              </button>
-              <button
-                aria-label="Clear Bug DB filters"
-                className="bug-query-icon-button"
-                disabled={!hasBugQuery || isBugRefreshing}
-                onClick={handleNewBugQuery}
-                title="Clear filters"
-                type="button"
-              >
-                <XIcon />
-              </button>
-            </form>
-
             <div className="bug-saved-query-row">
               <label>
-                <span className="visually-hidden">Saved query</span>
+                <span>Saved Query</span>
                 <select
                   aria-label="Saved Bug DB query"
                   onChange={(event) => handleSelectSavedBugQuery(event.target.value)}
                   value={selectedBugQueryId}
                 >
-                  <option value="">Saved queries</option>
+                  <option value="">Select query</option>
                   {projectBugQueries.map((query) => (
                     <option key={query.id} value={query.id}>
                       {query.name}
@@ -2864,7 +5178,7 @@ function DashboardShell({
                 </select>
               </label>
               <label>
-                <span className="visually-hidden">Query name</span>
+                <span>Query Name</span>
                 <input
                   aria-label="Query name"
                   onChange={(event) => setBugQueryName(event.target.value)}
@@ -2936,6 +5250,111 @@ function DashboardShell({
               </label>
               <span className="bug-upload-status" aria-live="polite">{isBugUploading ? "Uploading" : ""}</span>
             </div>
+
+            <form className="bug-query-form" onSubmit={handleRefreshBugs}>
+              <label>
+                <span>Product ID</span>
+                <input
+                  aria-label="Product ID"
+                  inputMode="numeric"
+                  onChange={(event) => updateBugQuery("productId", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.productId}
+                />
+              </label>
+              <label>
+                <span>Bug No</span>
+                <input
+                  aria-label="Bug No"
+                  onChange={(event) => updateBugQuery("rptno", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.rptno}
+                />
+              </label>
+              <label>
+                <span>Subject</span>
+                <input
+                  aria-label="Subject"
+                  onChange={(event) => updateBugQuery("subject", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.subject}
+                />
+              </label>
+              <label>
+                <span>Status</span>
+                <input
+                  aria-label="Status"
+                  onChange={(event) => updateBugQuery("status", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.status}
+                />
+              </label>
+              <label>
+                <span>Severity</span>
+                <input
+                  aria-label="Severity"
+                  onChange={(event) => updateBugQuery("severity", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.severity}
+                />
+              </label>
+              <label>
+                <span>Reported by</span>
+                <input
+                  aria-label="Reported by"
+                  onChange={(event) => updateBugQuery("reportedBy", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.reportedBy}
+                />
+              </label>
+              <label>
+                <span>Component</span>
+                <input
+                  aria-label="Component"
+                  onChange={(event) => updateBugQuery("component", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.component}
+                />
+              </label>
+              <label>
+                <span>Tag</span>
+                <input
+                  aria-label="Tag"
+                  onChange={(event) => updateBugQuery("tag", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.tag}
+                />
+              </label>
+              <label>
+                <span>Assignee</span>
+                <input
+                  aria-label="Assignee"
+                  onChange={(event) => updateBugQuery("assignee", event.target.value)}
+                  placeholder="Any"
+                  value={bugQuery.assignee}
+                />
+              </label>
+              <button
+                aria-label={isBugRefreshing ? "Refreshing Bug DB report" : "Search Bug DB"}
+                className="bug-query-icon-button primary"
+                disabled={!hasBugQuery || isBugRefreshing}
+                title={isBugRefreshing ? "Refreshing" : "Search"}
+                type="submit"
+              >
+                <SearchIcon />
+              </button>
+              <button
+                aria-label="Clear Bug DB filters"
+                className="bug-query-icon-button"
+                disabled={!hasBugQuery || isBugRefreshing}
+                onClick={handleNewBugQuery}
+                title="Clear filters"
+                type="button"
+              >
+                <XIcon />
+              </button>
+            </form>
+
           </div>
         </div>
       ) : null}
@@ -2946,21 +5365,42 @@ function DashboardShell({
           actions={actions}
           bugs={bugs}
           bugLastRefreshedAt={bugLastRefreshedAt}
-          bugReportVisible={hasBugQuery}
+          bugReportVisible={isBugReportVisible}
           bugRefreshError={bugRefreshError}
+          decisions={decisions}
+          phases={phases}
+          projectLinks={projectLinks}
           onActionTitleChange={onActionTitleChange}
           onAddAction={onAddAction}
           onCleanDuplicates={onCleanDuplicates}
+          onCreatePhase={onCreatePhase}
+          onCreatePhaseItem={onCreatePhaseItem}
+          onCreateProjectLink={onCreateProjectLink}
           onClearBugs={onClearBugs}
           onCompletionDateChange={onCompletionDateChange}
           onConfirmExtractedActions={onConfirmExtractedActions}
+          onDeleteDecision={onDeleteDecision}
+          onDeletePhase={onDeletePhase}
+          onDeletePhaseItem={onDeletePhaseItem}
+          onDeleteProjectLink={onDeleteProjectLink}
           onDeleteAction={onDeleteAction}
           onDeleteActions={onDeleteActions}
           onDeleteProjectNote={onDeleteProjectNote}
           onExtractActions={onExtractActions}
+          onMovePhase={onMovePhase}
+          onMovePhaseItem={onMovePhaseItem}
+          onReorderPhaseItems={onReorderPhaseItems}
+          onReorderPhases={onReorderPhases}
           onOwnerChange={onOwnerChange}
+          onSaveDecision={onSaveDecision}
           onSaveProjectNote={onSaveProjectNote}
           onStatusChange={onStatusChange}
+          onTabChange={onTabChange}
+          onUpdatePhase={onUpdatePhase}
+          onUpdatePhaseItem={onUpdatePhaseItem}
+          onUpdateProjectDetails={onUpdateProjectDetails}
+          onUpdateProjectLink={onUpdateProjectLink}
+          onUpdateDecision={onUpdateDecision}
           onUpdateProjectNote={onUpdateProjectNote}
           project={project}
           selectedBugColumns={selectedBugColumns}
@@ -2975,10 +5415,13 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [actions, setActions] = useState([]);
   const [updates, setUpdates] = useState([]);
+  const [decisions, setDecisions] = useState([]);
   const [bugs, setBugs] = useState([]);
   const [bugQueries, setBugQueries] = useState([]);
+  const [phases, setPhases] = useState([]);
+  const [projectLinks, setProjectLinks] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
-  const [activeTab, setActiveTab] = useState("status");
+  const [activeTab, setActiveTab] = useState("overview");
   const [apiError, setApiError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -2986,19 +5429,33 @@ function App() {
   const [actionsPendingDelete, setActionsPendingDelete] = useState([]);
   const [notePendingDelete, setNotePendingDelete] = useState(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState(null);
+  const [projectAskModal, setProjectAskModal] = useState(null);
   const [projectSummaryModal, setProjectSummaryModal] = useState(null);
   const [isSummarizingProject, setIsSummarizingProject] = useState(false);
+  const [followUps, setFollowUps] = useState([]);
+  const [isFollowUpLoading, setIsFollowUpLoading] = useState(false);
+  const [followUpError, setFollowUpError] = useState("");
   const [openClassifications, setOpenClassifications] = useState([]);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
   const toastTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (!dashboardTabs.some((tab) => tab.id === activeTab)) {
+      setActiveTab("overview");
+    }
+  }, [activeTab]);
 
   function applyBootstrapData(data, preferredProjectId = selectedProjectId) {
     const loadedProjects = data.projects ?? [];
     setProjects(loadedProjects);
     setActions(data.actions ?? []);
     setUpdates(data.updates ?? []);
+    setDecisions(data.decisions ?? []);
     setBugs(data.bugs ?? []);
     setBugQueries(data.bugQueries ?? []);
+    setPhases(data.phases ?? []);
+    setProjectLinks(data.projectLinks ?? []);
     setOpenClassifications((currentClassifications) => {
       const availableClassifications = [...new Set(loadedProjects.map((project) => project.classification))];
       const stillOpen = currentClassifications.filter((classification) =>
@@ -3014,7 +5471,11 @@ function App() {
     });
     setSelectedProjectId((currentSelectedProjectId) => {
       const candidate = preferredProjectId ?? currentSelectedProjectId;
-      return loadedProjects.some((project) => project.id === candidate) ? candidate : loadedProjects[0]?.id ?? null;
+      if (candidate === "all") return "all";
+      const activeProjects = loadedProjects.filter((project) => !project.archivedAt);
+      return loadedProjects.some((project) => project.id === candidate)
+        ? candidate
+        : activeProjects[0]?.id ?? loadedProjects[0]?.id ?? null;
     });
   }
 
@@ -3022,6 +5483,21 @@ function App() {
     const data = await apiRequest("/bootstrap");
     applyBootstrapData(data, preferredProjectId);
     return data;
+  }
+
+  async function loadFollowUps() {
+    try {
+      setIsFollowUpLoading(true);
+      setFollowUpError("");
+      const data = await apiRequest("/followups");
+      setFollowUps(data.followUps ?? []);
+      return data.followUps ?? [];
+    } catch (error) {
+      setFollowUpError(error instanceof Error ? error.message : "Could not detect follow-ups.");
+      return [];
+    } finally {
+      setIsFollowUpLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -3053,9 +5529,19 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (selectedProjectId !== "all") return;
+    loadFollowUps();
+  }, [selectedProjectId, projects.length, updates.length, actions.length, decisions.length]);
+
+  const visibleProjects = useMemo(
+    () => projects.filter((project) => showArchivedProjects || !project.archivedAt),
+    [projects, showArchivedProjects],
+  );
+
   const classificationGroups = useMemo(() => {
     const groups = new Map();
-    projects.forEach((project) => {
+    visibleProjects.forEach((project) => {
       const groupedProjects = groups.get(project.classification) ?? [];
       groups.set(project.classification, groupedProjects.concat(project));
     });
@@ -3063,12 +5549,23 @@ function App() {
       classification,
       projects: groupedProjects,
     }));
-  }, [projects]);
+  }, [visibleProjects]);
 
-  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0] ?? null;
+  const isAllProjectsView = selectedProjectId === "all";
+  const selectedProject = isAllProjectsView
+    ? null
+    : visibleProjects.find((project) => project.id === selectedProjectId) ?? visibleProjects[0] ?? null;
   const selectedActions = selectedProject ? actions.filter((action) => action.projectId === selectedProject.id) : [];
   const selectedUpdates = selectedProject ? updates.filter((update) => update.projectId === selectedProject.id) : [];
+  const selectedDecisions = selectedProject ? decisions.filter((decision) => decision.projectId === selectedProject.id) : [];
   const selectedBugs = selectedProject ? bugs.filter((bug) => bug.projectId === selectedProject.id) : [];
+  const selectedPhases = selectedProject ? phases.filter((phase) => phase.projectId === selectedProject.id) : [];
+  const selectedProjectLinks = selectedProject ? projectLinks.filter((link) => link.projectId === selectedProject.id) : [];
+  const hasSummarySource =
+    selectedActions.length > 0 ||
+    selectedUpdates.length > 0 ||
+    selectedDecisions.length > 0 ||
+    selectedBugs.length > 0;
   const metrics = actionStatuses.map((status) => ({
     ...status,
     value: selectedActions.filter((action) => action.status === status.value).length,
@@ -3093,20 +5590,25 @@ function App() {
     );
   }
 
+  function handleAllProjectsSelect() {
+    setSelectedProjectId("all");
+  }
+
   async function handleCreateProject(projectInput) {
     try {
       setApiError("");
       const { project } = await apiRequest("/projects", {
         body: JSON.stringify({
           classification: projectInput.classification,
-          members: parseMembers(projectInput.members),
+          epic: projectInput.epic,
           name: projectInput.name.trim(),
+          targetRelease: projectInput.targetRelease,
         }),
         method: "POST",
       });
 
       await loadBootstrap(project.id);
-      setActiveTab("status");
+      setActiveTab("overview");
       showToast(`${project.name} created`);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not create project.");
@@ -3114,21 +5616,20 @@ function App() {
     }
   }
 
-  async function handleUpdateMembers(membersValue) {
+  async function handleUpdateProjectDetails(projectDetails) {
     if (!selectedProject) return;
 
     try {
       setApiError("");
-      const members = parseMembers(membersValue);
-      const { project: updatedProject } = await apiRequest(`/projects/${selectedProject.id}/members`, {
-        body: JSON.stringify({ members }),
+      const { project: updatedProject } = await apiRequest(`/projects/${selectedProject.id}/details`, {
+        body: JSON.stringify(projectDetails),
         method: "PATCH",
       });
 
       await loadBootstrap(updatedProject.id);
-      showToast("Members updated");
+      showToast("Project details updated");
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not update members.");
+      setApiError(error instanceof Error ? error.message : "Could not update project details.");
       throw error;
     }
   }
@@ -3140,13 +5641,31 @@ function App() {
     try {
       setApiError("");
       setIsSummarizingProject(true);
-      const { summary } = await apiRequest(`/projects/${projectId}/summary`, { method: "POST" });
+      const visibleBugs = bugs.filter((bug) => bug.projectId === projectId);
+      const { summary } = await apiRequest(`/projects/${projectId}/summary`, {
+        body: JSON.stringify({ bugs: visibleBugs }),
+        method: "POST",
+      });
       setProjectSummaryModal({ project: projectToSummarize, summary });
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not summarize project notes.");
       throw error;
     } finally {
       setIsSummarizingProject(false);
+    }
+  }
+
+  async function handleAskProjectMemory(projectId, question) {
+    try {
+      setApiError("");
+      const { answer } = await apiRequest(`/projects/${projectId}/memory-question`, {
+        body: JSON.stringify({ question }),
+        method: "POST",
+      });
+      return answer;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not answer from project memory.");
+      throw error;
     }
   }
 
@@ -3162,7 +5681,7 @@ function App() {
 
       await loadBootstrap(nextProjectId);
       if (deletedSelectedProject) {
-        setActiveTab("status");
+        setActiveTab("overview");
       }
       setProjectPendingDelete(null);
       showToast(`${projectToDelete.name} deleted`);
@@ -3171,8 +5690,44 @@ function App() {
     }
   }
 
+  async function handleArchiveProject(projectToArchive) {
+    if (!projectToArchive) return;
+
+    try {
+      setApiError("");
+      const { project: archivedProject } = await apiRequest(`/projects/${projectToArchive.id}/archive`, { method: "POST" });
+      const nextProjectId =
+        selectedProjectId === archivedProject.id
+          ? projects.find((project) => project.id !== archivedProject.id && !project.archivedAt)?.id ?? null
+          : selectedProjectId;
+      await loadBootstrap(nextProjectId);
+      if (selectedProjectId === archivedProject.id) {
+        setActiveTab("overview");
+      }
+      showToast(`${archivedProject.name} archived`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not archive project.");
+    }
+  }
+
+  async function handleRestoreProject(projectToRestore) {
+    if (!projectToRestore) return;
+
+    try {
+      setApiError("");
+      const { project: restoredProject } = await apiRequest(`/projects/${projectToRestore.id}/restore`, { method: "POST" });
+      await loadBootstrap(restoredProject.id);
+      setSelectedProjectId(restoredProject.id);
+      setActiveTab("overview");
+      showToast(`${restoredProject.name} restored`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not restore project.");
+    }
+  }
+
   async function handleAddAction(actionInput) {
-    if (!selectedProject) return;
+    const projectId = actionInput.projectId ?? selectedProject?.id;
+    if (!projectId) return;
 
     try {
       setApiError("");
@@ -3180,7 +5735,7 @@ function App() {
         body: JSON.stringify({
           owner: actionInput.owner,
           completionDate: actionInput.completionDate,
-          projectId: selectedProject.id,
+          projectId,
           source: actionInput.source,
           status: actionInput.status,
           title: actionInput.title.trim(),
@@ -3188,10 +5743,39 @@ function App() {
         method: "POST",
       });
 
-      setActions((currentActions) => [action, ...currentActions]);
-      showToast("Action added");
+      setActions((currentActions) =>
+        currentActions.some((currentAction) => currentAction.id === action.id)
+          ? currentActions
+          : [action, ...currentActions],
+      );
+      showToast(action.duplicate ? "Action already exists" : "Action added");
+      return action;
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not add action.");
+      throw error;
+    }
+  }
+
+  async function handleCreateFollowUpAction(followUp) {
+    if (followUp.actionId) {
+      setSelectedProjectId(followUp.projectId);
+      setActiveTab("status");
+      showToast("Opened action board");
+      return;
+    }
+
+    const createdAction = await handleAddAction({
+      completionDate: null,
+      owner: null,
+      projectId: followUp.projectId,
+      source: "follow-up",
+      status: "active",
+      title: followUp.suggestedAction || followUp.topic,
+    });
+    if (createdAction) {
+      setFollowUps((currentFollowUps) =>
+        currentFollowUps.filter((item) => `${item.projectId}-${item.topic}` !== `${followUp.projectId}-${followUp.topic}`),
+      );
     }
   }
 
@@ -3342,7 +5926,7 @@ function App() {
 
     try {
       setApiError("");
-      const { actions: confirmedActions } = await apiRequest("/actions/bulk", {
+      const { actions: confirmedActions, skippedDuplicates = 0 } = await apiRequest("/actions/bulk", {
         body: JSON.stringify({
           actions: actionDrafts.map((action) => ({
             completionDate: action.completionDate,
@@ -3357,8 +5941,15 @@ function App() {
         method: "POST",
       });
 
-      setActions((currentActions) => confirmedActions.concat(currentActions));
-      showToast(`${confirmedActions.length} actions added`);
+      setActions((currentActions) => {
+        const currentIds = new Set(currentActions.map((action) => action.id));
+        return confirmedActions.filter((action) => !currentIds.has(action.id)).concat(currentActions);
+      });
+      showToast(
+        skippedDuplicates
+          ? `${confirmedActions.length} actions added, ${skippedDuplicates} duplicates skipped`
+          : `${confirmedActions.length} actions added`,
+      );
       return confirmedActions;
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not add reviewed actions.");
@@ -3371,7 +5962,7 @@ function App() {
 
     try {
       setApiError("");
-      const { update } = await apiRequest("/updates", {
+      const { update, decisions: projectDecisions } = await apiRequest("/updates", {
         body: JSON.stringify({
           blocker: "",
           createAction: false,
@@ -3384,6 +5975,13 @@ function App() {
       });
 
       setUpdates((currentUpdates) => [update, ...currentUpdates]);
+      if (projectDecisions) {
+        setDecisions((currentDecisions) =>
+          currentDecisions
+            .filter((decision) => decision.projectId !== selectedProject.id)
+            .concat(projectDecisions),
+        );
+      }
       return update;
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not save note to project feed.");
@@ -3394,7 +5992,7 @@ function App() {
   async function handleUpdateProjectNote(updateId, noteInput) {
     try {
       setApiError("");
-      const { update } = await apiRequest(`/updates/${updateId}`, {
+      const { update, decisions: projectDecisions } = await apiRequest(`/updates/${updateId}`, {
         body: JSON.stringify({
           meetingDate: noteInput.meetingDate,
           text: noteInput.text,
@@ -3405,6 +6003,13 @@ function App() {
       setUpdates((currentUpdates) =>
         currentUpdates.map((currentUpdate) => (currentUpdate.id === update.id ? update : currentUpdate)),
       );
+      if (projectDecisions) {
+        setDecisions((currentDecisions) =>
+          currentDecisions
+            .filter((decision) => decision.projectId !== update.projectId)
+            .concat(projectDecisions),
+        );
+      }
       showToast("Project note updated");
       return update;
     } catch (error) {
@@ -3418,12 +6023,82 @@ function App() {
 
     try {
       setApiError("");
-      await apiRequest(`/updates/${noteToDelete.id}`, { method: "DELETE" });
+      const { decisions: projectDecisions } = await apiRequest(`/updates/${noteToDelete.id}`, { method: "DELETE" });
       setUpdates((currentUpdates) => currentUpdates.filter((update) => update.id !== noteToDelete.id));
+      if (projectDecisions) {
+        setDecisions((currentDecisions) =>
+          currentDecisions
+            .filter((decision) => decision.projectId !== noteToDelete.projectId)
+            .concat(projectDecisions),
+        );
+      }
       setNotePendingDelete(null);
       showToast("Project note deleted");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not delete project note.");
+      throw error;
+    }
+  }
+
+  async function handleSaveDecision(decisionInput) {
+    if (!selectedProject || !decisionInput.text?.trim()) return null;
+
+    try {
+      setApiError("");
+      const { decision } = await apiRequest("/decisions", {
+        body: JSON.stringify({
+          decisionDate: decisionInput.decisionDate,
+          owner: decisionInput.owner,
+          projectId: selectedProject.id,
+          status: decisionInput.status,
+          text: decisionInput.text,
+        }),
+        method: "POST",
+      });
+      setDecisions((currentDecisions) => currentDecisions.concat(decision));
+      showToast("Decision added");
+      return decision;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not save decision.");
+      throw error;
+    }
+  }
+
+  async function handleUpdateDecision(decisionId, decisionInput) {
+    try {
+      setApiError("");
+      const { decision } = await apiRequest(`/decisions/${decisionId}`, {
+        body: JSON.stringify({
+          decisionDate: decisionInput.decisionDate,
+          owner: decisionInput.owner,
+          status: decisionInput.status,
+          text: decisionInput.text,
+        }),
+        method: "PATCH",
+      });
+      setDecisions((currentDecisions) =>
+        currentDecisions.map((currentDecision) => currentDecision.id === decision.id ? decision : currentDecision),
+      );
+      showToast("Decision updated");
+      return decision;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not update decision.");
+      throw error;
+    }
+  }
+
+  async function handleDeleteDecision(decisionToDelete) {
+    if (!decisionToDelete) return;
+
+    try {
+      setApiError("");
+      await apiRequest(`/decisions/${decisionToDelete.id}`, { method: "DELETE" });
+      setDecisions((currentDecisions) =>
+        currentDecisions.filter((decision) => decision.id !== decisionToDelete.id),
+      );
+      showToast("Decision deleted");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not delete decision.");
       throw error;
     }
   }
@@ -3496,7 +6171,7 @@ function App() {
     }
   }
 
-  async function handleUpdateBugQuery(queryId, payload) {
+  async function handleUpdateBugQuery(queryId, payload, options = {}) {
     try {
       setApiError("");
       const { bugQuery } = await apiRequest(`/bug-queries/${queryId}`, {
@@ -3504,7 +6179,9 @@ function App() {
         method: "PATCH",
       });
       setBugQueries((currentQueries) => currentQueries.map((query) => (query.id === bugQuery.id ? bugQuery : query)));
-      showToast("Bug query updated");
+      if (!options.silent) {
+        showToast("Bug query updated");
+      }
       return bugQuery;
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not update bug query.");
@@ -3524,6 +6201,190 @@ function App() {
     }
   }
 
+  async function handleCreatePhase(projectId, payload) {
+    try {
+      setApiError("");
+      const { phase } = await apiRequest(`/projects/${projectId}/phases`, {
+        body: JSON.stringify(payload),
+        method: "POST",
+      });
+      setPhases((currentPhases) => currentPhases.concat(phase));
+      showToast("Phase added");
+      return phase;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not add phase.");
+      throw error;
+    }
+  }
+
+  async function handleUpdatePhase(phaseId, payload) {
+    try {
+      setApiError("");
+      const { phase } = await apiRequest(`/phases/${phaseId}`, {
+        body: JSON.stringify(payload),
+        method: "PATCH",
+      });
+      setPhases((currentPhases) => currentPhases.map((currentPhase) => currentPhase.id === phase.id ? phase : currentPhase));
+      showToast("Phase updated");
+      return phase;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not update phase.");
+      throw error;
+    }
+  }
+
+  async function handleDeletePhase(phaseToDelete) {
+    try {
+      setApiError("");
+      await apiRequest(`/phases/${phaseToDelete.id}`, { method: "DELETE" });
+      setPhases((currentPhases) => currentPhases.filter((phase) => phase.id !== phaseToDelete.id));
+      showToast("Phase deleted");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not delete phase.");
+      throw error;
+    }
+  }
+
+  async function handleMovePhase(phaseId, direction) {
+    try {
+      setApiError("");
+      await apiRequest(`/phases/${phaseId}/${direction}`, { method: "POST" });
+      await loadBootstrap(selectedProjectId);
+      showToast("Phase moved");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not move phase.");
+      throw error;
+    }
+  }
+
+  async function handleReorderPhases(projectId, orderedIds) {
+    try {
+      setApiError("");
+      await apiRequest(`/projects/${projectId}/phases/reorder`, {
+        body: JSON.stringify({ ids: orderedIds }),
+        method: "POST",
+      });
+      await loadBootstrap(selectedProjectId);
+      showToast("Phases reordered");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reorder phases.");
+      throw error;
+    }
+  }
+
+  async function handleCreatePhaseItem(phaseId, payload) {
+    try {
+      setApiError("");
+      await apiRequest(`/phases/${phaseId}/items`, {
+        body: JSON.stringify(payload),
+        method: "POST",
+      });
+      await loadBootstrap(selectedProjectId);
+      showToast("Subtype added");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not add subtype.");
+      throw error;
+    }
+  }
+
+  async function handleUpdatePhaseItem(itemId, payload) {
+    try {
+      setApiError("");
+      await apiRequest(`/phase-items/${itemId}`, {
+        body: JSON.stringify(payload),
+        method: "PATCH",
+      });
+      await loadBootstrap(selectedProjectId);
+      showToast(payload.completed === true ? "Subtype completed" : payload.completed === false ? "Subtype reopened" : "Subtype updated");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not update subtype.");
+      throw error;
+    }
+  }
+
+  async function handleDeletePhaseItem(itemToDelete) {
+    try {
+      setApiError("");
+      await apiRequest(`/phase-items/${itemToDelete.id}`, { method: "DELETE" });
+      await loadBootstrap(selectedProjectId);
+      showToast("Subtype deleted");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not delete subtype.");
+      throw error;
+    }
+  }
+
+  async function handleMovePhaseItem(itemId, direction) {
+    try {
+      setApiError("");
+      await apiRequest(`/phase-items/${itemId}/${direction}`, { method: "POST" });
+      await loadBootstrap(selectedProjectId);
+      showToast("Subtype moved");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not move subtype.");
+      throw error;
+    }
+  }
+
+  async function handleReorderPhaseItems(phaseId, orderedIds) {
+    try {
+      setApiError("");
+      await apiRequest(`/phases/${phaseId}/items/reorder`, {
+        body: JSON.stringify({ ids: orderedIds }),
+        method: "POST",
+      });
+      await loadBootstrap(selectedProjectId);
+      showToast("Subtypes reordered");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reorder subtypes.");
+      throw error;
+    }
+  }
+
+  async function handleCreateProjectLink(projectId, payload) {
+    try {
+      setApiError("");
+      const { projectLink } = await apiRequest(`/projects/${projectId}/links`, {
+        body: JSON.stringify(payload),
+        method: "POST",
+      });
+      setProjectLinks((currentLinks) => currentLinks.concat(projectLink));
+      showToast("Useful link added");
+      return projectLink;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not add useful link.");
+      throw error;
+    }
+  }
+
+  async function handleUpdateProjectLink(linkId, payload) {
+    try {
+      setApiError("");
+      const { projectLink } = await apiRequest(`/project-links/${linkId}`, {
+        body: JSON.stringify(payload),
+        method: "PATCH",
+      });
+      setProjectLinks((currentLinks) => currentLinks.map((link) => link.id === projectLink.id ? projectLink : link));
+      showToast("Useful link updated");
+      return projectLink;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not update useful link.");
+      throw error;
+    }
+  }
+
+  async function handleDeleteProjectLink(linkToDelete) {
+    try {
+      setApiError("");
+      await apiRequest(`/project-links/${linkToDelete.id}`, { method: "DELETE" });
+      setProjectLinks((currentLinks) => currentLinks.filter((link) => link.id !== linkToDelete.id));
+      showToast("Useful link deleted");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not delete useful link.");
+      throw error;
+    }
+  }
+
   function handleToggleClassification(classification) {
     setOpenClassifications((currentClassifications) =>
       currentClassifications.includes(classification)
@@ -3536,14 +6397,20 @@ function App() {
     <div className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <Sidebar
         classificationGroups={classificationGroups}
+        isAllProjectsSelected={isAllProjectsView}
         isCollapsed={isSidebarCollapsed}
+        onAllProjectsSelect={handleAllProjectsSelect}
+        onArchiveProject={handleArchiveProject}
         onCreateProject={handleCreateProject}
         onProjectSelect={handleProjectSelect}
         onRequestDeleteProject={setProjectPendingDelete}
+        onRestoreProject={handleRestoreProject}
+        onToggleArchivedProjects={setShowArchivedProjects}
         onToggleSidebar={() => setIsSidebarCollapsed((isCollapsed) => !isCollapsed)}
         onToggleClassification={handleToggleClassification}
         openClassifications={openClassifications}
         selectedProject={selectedProject}
+        showArchivedProjects={showArchivedProjects}
       />
       <main className="workspace">
         {apiError ? (
@@ -3556,24 +6423,43 @@ function App() {
             <p className="eyebrow">Backend</p>
             <h2>Loading Project Pulse data</h2>
           </section>
+        ) : isAllProjectsView ? (
+          <DashboardLevelView
+            actions={actions}
+            followUpError={followUpError}
+            followUps={followUps}
+            isFollowUpLoading={isFollowUpLoading}
+            onCreateFollowUpAction={handleCreateFollowUpAction}
+            onRefreshFollowUps={loadFollowUps}
+            projects={projects}
+            updates={updates}
+          />
         ) : selectedProject ? (
           <>
             <ProjectSummary
               actions={selectedActions}
-              hasProjectNotes={selectedUpdates.length > 0}
+              hasSummarySource={hasSummarySource}
               isSummarizingProject={isSummarizingProject}
               metrics={metrics}
+              onOpenProjectAsk={setProjectAskModal}
               onSummarizeProject={handleSummarizeProject}
-              onUpdateMembers={handleUpdateMembers}
+              onUpdateProjectDetails={handleUpdateProjectDetails}
               selectedProject={selectedProject}
+              updates={selectedUpdates}
             />
             <DashboardShell
               activeTab={activeTab}
               actions={selectedActions}
               bugs={selectedBugs}
               bugQueries={bugQueries}
+              decisions={selectedDecisions}
+              phases={selectedPhases}
+              projectLinks={selectedProjectLinks}
               onActionTitleChange={handleActionTitleChange}
               onAddAction={handleAddAction}
+              onCreatePhase={handleCreatePhase}
+              onCreatePhaseItem={handleCreatePhaseItem}
+              onCreateProjectLink={handleCreateProjectLink}
               onCreateBugQuery={handleCreateBugQuery}
               onCleanDuplicates={handleCleanDuplicates}
               onClearBugs={handleClearBugs}
@@ -3582,15 +6468,29 @@ function App() {
               onDeleteBugQuery={handleDeleteBugQuery}
               onDeleteAction={setActionPendingDelete}
               onDeleteActions={setActionsPendingDelete}
+              onDeleteDecision={handleDeleteDecision}
+              onDeletePhase={handleDeletePhase}
+              onDeletePhaseItem={handleDeletePhaseItem}
+              onDeleteProjectLink={handleDeleteProjectLink}
               onDeleteProjectNote={setNotePendingDelete}
               onExtractActions={handleExtractActions}
+              onMovePhase={handleMovePhase}
+              onMovePhaseItem={handleMovePhaseItem}
+              onReorderPhaseItems={handleReorderPhaseItems}
+              onReorderPhases={handleReorderPhases}
               onOwnerChange={handleOwnerChange}
               onRefreshBugs={handleRefreshBugs}
               onUploadBugs={handleUploadBugs}
+              onSaveDecision={handleSaveDecision}
               onSaveProjectNote={handleSaveProjectNote}
               onStatusChange={handleStatusChange}
               onTabChange={setActiveTab}
+              onUpdatePhase={handleUpdatePhase}
+              onUpdatePhaseItem={handleUpdatePhaseItem}
+              onUpdateProjectDetails={handleUpdateProjectDetails}
+              onUpdateProjectLink={handleUpdateProjectLink}
               onUpdateBugQuery={handleUpdateBugQuery}
+              onUpdateDecision={handleUpdateDecision}
               onUpdateProjectNote={handleUpdateProjectNote}
               project={selectedProject}
               updates={selectedUpdates}
@@ -3640,6 +6540,14 @@ function App() {
           summary={projectSummaryModal.summary}
         />
       ) : null}
+      {projectAskModal ? (
+        <ProjectAskDialog
+          onAskQuestion={handleAskProjectMemory}
+          onClose={() => setProjectAskModal(null)}
+          project={projectAskModal}
+        />
+      ) : null}
+      <TooltipLayer />
     </div>
   );
 }

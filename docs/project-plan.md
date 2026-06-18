@@ -2,65 +2,67 @@
 
 ## Product Vision
 
-Project Pulse helps teams track daily project progress in one place. It connects project status, action items, meeting notes, latest updates, and bug signals so that everyone can see what is active, blocked, and completed.
+Project Pulse helps teams keep project state, meeting notes, decisions, milestones, actions, and bug signals in one working surface so people can see what is active, blocked, at risk, and done without piecing it together by hand.
 
 ## Core Users
 
-- Project owner: creates projects, reviews progress, follows up on blockers.
-- Team member: contributes meeting notes or latest updates, owns action items, checks off completed work.
-- Viewer: reviews project status, bugs, meeting outcomes, and action progress.
+- Project owner: creates projects, maintains overview details, reviews milestones, tracks follow-ups, and asks for summaries.
+- Team member: contributes notes, confirms extracted actions, updates action ownership and dates, and records decisions.
+- Viewer: reviews project status, milestones, bugs, decisions, and executive summaries.
 
 ## Core Modules
 
 ### Projects
 
 - Create multiple projects.
-- Assign a user-defined classification such as Work, Personal, Customer, Internal, or any other category.
-- Add project members during project creation or later from the dashboard.
-- Select a project as the current dashboard context.
+- Assign user-defined classifications such as Work, Personal, Customer, Internal, or any other category.
+- Store project summary details, role details, target release, and optional epic context.
+- Add and edit project members from the dashboard.
+- Archive projects and optionally show archived projects in navigation.
+- Select either a single project or an All Projects view.
 
 ### Dashboard
 
-- Show status summary for the selected project.
-- Show Active, Blocked, and Done status lanes by project.
-- Show action checklist by person with editable action status.
-- Keep all dashboard sections scoped to the selected project.
+- Show active, blocked, and done counts for the selected project.
+- Show Status by Project lanes with editable actions.
+- Show Status by Person with owner, status, overdue, and meeting-date filtering.
+- Keep project sections scoped to the selected project while supporting an All Projects navigation mode.
 
-### Meeting Notes
+### Meeting Notes And Memory
 
 - Capture notes inside the selected project context.
-- Show latest project updates in the Meeting Notes view.
-- Extract important points and action items from notes through the backend OCI GenAI endpoint when configured.
-- Add extracted actions directly to actions by person and status lanes.
-- Show a clear setup error when AI is not configured.
+- Save project notes with meeting dates.
+- Review extracted draft actions before persisting them.
+- Track decisions and blockers from meeting conversations.
+- Ask project-memory questions across notes, decisions, actions, and milestones.
+- Generate executive summaries when AI is configured, with local fallbacks when needed.
 
-### Uploads
+### Milestones And Links
 
-- Upload AI companion notes as text into the Meeting Notes area.
-- Keep meeting video upload out of the current UI.
+- Track project phases and nested subtype or checklist items.
+- Reorder, edit, complete, and remove phase items as project plans change.
+- Keep a useful-links list in the project overview for quick access to project resources.
 
 ### Bug DB
 
 - Show bugs linked to the selected project.
-- Load project-scoped Bug DB data from uploaded Excel reports, with backend URL refresh planned later.
-- Run a simple Bug DB query against project-linked bugs.
-- Filter by assignee and status.
-- Show a compact summary: total, open, in progress, high risk.
+- Load project-scoped Bug DB data from uploaded Excel or CSV reports.
+- Refresh project-scoped bug data from backend URL and helper-based queries.
+- Save reusable bug queries per project.
+- Filter bug data and control which uploaded columns are visible.
 
-## MVP Scope
+## Current Scope
 
-- Single dashboard UI.
-- Project creation with custom classification.
-- Project member management.
-- Project-scoped Active, Blocked, and Done status lanes.
-- Project-scoped action checklist with status changes.
-- Meeting Notes view with latest updates and AI action extraction.
-- Meeting notes that create AI-extracted action items when configured.
-- Bug DB sample data, URL fetch, query, and filters.
+- Single local dashboard with persisted SQLite data.
+- Project creation, editing, member management, and archiving.
+- Project-scoped actions with dates, filters, bulk delete, and review-before-save extraction.
+- Meeting Notes, decision log, project memory, and executive summary flows.
+- Project milestone phases and useful links.
+- Bug DB upload, saved queries, refresh, filters, and flexible report columns.
 
 ## Later Scope
 
 - Real meeting video transcription and summarization.
-- Real Bug DB integration.
 - User authentication and project permissions.
-- Reports and historical trends.
+- Hosted deployment and production AI key management.
+- Broader reporting and historical trend views across projects.

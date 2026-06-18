@@ -17,8 +17,10 @@ from unittest.mock import patch
 
 from backend.app import (
     configured_ai_settings,
+    fallback_followups,
     local_project_summary,
     make_server,
+    memory_suggestions_from_notes,
     normalize_ai_payload,
     normalize_summary_payload,
     parse_ai_json,
@@ -102,13 +104,73 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(bootstrap["projects"]), 4)
         self.assertGreaterEqual(len(bootstrap["actions"]), 1)
-        self.assertGreaterEqual(len(bootstrap["bugs"]), 1)
+        self.assertEqual(bootstrap["bugs"], [])
+        self.assertGreaterEqual(len(bootstrap["phases"]), 4)
+        self.assertIn("projectLinks", bootstrap)
+
+    def test_followups_endpoint_returns_detected_items(self) -> None:
+        fake_followups = [
+            {
+                "projectId": 1,
+                "topic": "Analytics blocker",
+                "signal": "Mentioned in multiple meetings.",
+                "flags": ["repeated_blocker"],
+                "suggestedAction": "Confirm owner and next step for analytics blocker",
+            }
+        ]
+
+        with patch("backend.app.detect_followups_with_ai", return_value=fake_followups) as detect:
+            status, payload = self.client.request("GET", "/api/followups")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["followUps"][0]["topic"], "Analytics blocker")
+        self.assertEqual(payload["followUps"][0]["projectName"], "Customer Portal Launch")
+        projects, updates, actions, decisions = detect.call_args.args
+        self.assertGreaterEqual(len(projects), 1)
+        self.assertGreaterEqual(len(updates), 1)
+        self.assertGreaterEqual(len(actions), 1)
+        self.assertIsInstance(decisions, list)
+
+    def test_followup_fallback_uses_repeated_topics_not_action_hygiene(self) -> None:
+        projects = [{"id": 1, "name": "Sales", "archivedAt": None}]
+        followups = fallback_followups(
+            projects,
+            [
+                {"projectId": 1, "text": "Customer ask is still pending for UX timeline."},
+                {"projectId": 1, "text": "Customer ask is still pending for UX timeline."},
+            ],
+            [
+                {
+                    "completionDate": None,
+                    "id": 1,
+                    "owner": "AA",
+                    "projectId": 1,
+                    "source": "manual",
+                    "status": "active",
+                    "title": "Normal active task",
+                },
+                {
+                    "completionDate": None,
+                    "id": 2,
+                    "owner": None,
+                    "projectId": 1,
+                    "source": "manual",
+                    "status": "active",
+                    "title": "Needs owner",
+                },
+            ],
+            [],
+        )
+
+        self.assertEqual(len(followups), 1)
+        self.assertIsNone(followups[0]["actionId"])
+        self.assertIn("Customer ask", followups[0]["topic"])
 
     def test_project_create_member_and_delete_cascade(self) -> None:
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Backend Build", "classification": "Work", "members": ["Parul", "Asha"]},
+            {"name": "Backend Build", "classification": "Work", "roleDetails": {"developers": "Parul, Asha"}},
         )
         self.assertEqual(status, 201)
         project = created["project"]
@@ -155,6 +217,132 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, dashboard = self.client.request("GET", f"/api/projects/{project['id']}/dashboard")
         self.assertEqual(status, 404)
         self.assertEqual(dashboard["error"], "Project not found.")
+
+    def test_project_archive_and_restore_keeps_project_data(self) -> None:
+        status, archived = self.client.request("POST", "/api/projects/1/archive")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(archived["project"]["archivedAt"])
+
+        status, dashboard = self.client.request("GET", "/api/projects/1/dashboard")
+        self.assertEqual(status, 200)
+        self.assertEqual(dashboard["project"]["id"], 1)
+        self.assertGreaterEqual(len(dashboard["actions"]), 1)
+
+        status, restored = self.client.request("POST", "/api/projects/1/restore")
+        self.assertEqual(status, 200)
+        self.assertIsNone(restored["project"]["archivedAt"])
+
+    def test_project_overview_details_phases_and_links(self) -> None:
+        status, created = self.client.request(
+            "POST",
+            "/api/projects",
+            {
+                "name": "Milestone Project",
+                "classification": "Work",
+                "epic": "EPIC-001",
+                "targetRelease": "25D",
+                "roleDetails": {"deliveryManager": "Parul"},
+            },
+        )
+        self.assertEqual(status, 201)
+        project_id = created["project"]["id"]
+        self.assertEqual(created["project"]["epic"], "EPIC-001")
+        self.assertEqual(created["project"]["targetRelease"], "25D")
+
+        status, details = self.client.request(
+            "PATCH",
+            f"/api/projects/{project_id}/details",
+            {
+                "classification": "Customer Delivery",
+                "epic": "EPIC-101",
+                "targetRelease": "26A",
+                "roleDetails": {
+                    "deliveryManager": "Parul",
+                    "developers": "Asha, Ben",
+                    "qaMembers": "Mia",
+                    "productManager": "Ravi",
+                    "designers": "Kriti",
+                    "Release Manager": "Noor",
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(details["project"]["classification"], "customer-delivery")
+        self.assertEqual(details["project"]["epic"], "EPIC-101")
+        self.assertEqual(details["project"]["targetRelease"], "26A")
+        self.assertNotIn("epic", details["project"]["roleDetails"])
+        self.assertEqual(details["project"]["roleDetails"]["Release Manager"], "Noor")
+        self.assertEqual(details["project"]["members"], ["Parul", "Asha", "Ben", "Mia", "Ravi", "Kriti", "Noor"])
+
+        status, phases = self.client.request("GET", f"/api/projects/{project_id}/phases")
+        self.assertEqual(status, 200)
+        self.assertEqual(phases["phases"][0]["name"], "Discovery")
+
+        first_item = phases["phases"][0]["items"][0]
+        status, updated_item = self.client.request(
+            "PATCH",
+            f"/api/phase-items/{first_item['id']}",
+            {"completed": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(updated_item["phaseItem"]["completed"])
+
+        status, phase = self.client.request(
+            "POST",
+            f"/api/projects/{project_id}/phases",
+            {"name": "Adoption", "milestone": "Adoption complete", "items": ["Enable users"]},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(phase["phase"]["items"][0]["title"], "Enable users")
+
+        status, moved_phase = self.client.request("POST", f"/api/phases/{phase['phase']['id']}/up")
+        self.assertEqual(status, 200)
+        self.assertLess(moved_phase["phase"]["sortOrder"], phase["phase"]["sortOrder"])
+
+        status, reordered_phases = self.client.request(
+            "POST",
+            f"/api/projects/{project_id}/phases/reorder",
+            {"ids": [phase["phase"]["id"], phases["phases"][0]["id"]]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(reordered_phases["phases"][0]["id"], phase["phase"]["id"])
+
+        status, new_item = self.client.request(
+            "POST",
+            f"/api/phases/{phases['phases'][0]['id']}/items",
+            {"title": "Second discovery item"},
+        )
+        self.assertEqual(status, 201)
+        status, moved_item = self.client.request("POST", f"/api/phase-items/{new_item['phaseItem']['id']}/up")
+        self.assertEqual(status, 200)
+        self.assertLess(moved_item["phaseItem"]["sortOrder"], new_item["phaseItem"]["sortOrder"])
+
+        status, reordered_items = self.client.request(
+            "POST",
+            f"/api/phases/{phases['phases'][0]['id']}/items/reorder",
+            {"ids": [first_item["id"], new_item["phaseItem"]["id"]]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(reordered_items["phaseItems"][0]["id"], first_item["id"])
+
+        status, link = self.client.request(
+            "POST",
+            f"/api/projects/{project_id}/links",
+            {"name": "Epic", "address": "https://example.test/EPIC-101", "linkText": "EPIC-101"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(link["projectLink"]["name"], "Epic")
+        self.assertEqual(link["projectLink"]["address"], "https://example.test/EPIC-101")
+        self.assertEqual(link["projectLink"]["linkText"], "EPIC-101")
+
+        status, updated_link = self.client.request(
+            "PATCH",
+            f"/api/project-links/{link['projectLink']['id']}",
+            {"name": "Main Epic", "address": "https://example.test/EPIC-202", "linkText": "EPIC-202"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated_link["projectLink"]["address"], "https://example.test/EPIC-202")
+        self.assertEqual(updated_link["projectLink"]["linkText"], "EPIC-202")
 
     def test_update_can_create_action_and_patch_status(self) -> None:
         status, payload = self.client.request(
@@ -220,7 +408,75 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn(action_id, [action["id"] for action in dashboard["actions"]])
 
-    def test_bug_refresh_replaces_only_project_bugs(self) -> None:
+    def test_project_note_does_not_auto_create_decision_log_entries(self) -> None:
+        status, payload = self.client.request(
+            "POST",
+            "/api/updates",
+            {
+                "projectId": 1,
+                "meetingDate": "2026-06-01",
+                "text": "The team agreed to use the Redwood design. General discussion continued.",
+            },
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["decisions"], [])
+
+        update_id = payload["update"]["id"]
+        status, updated = self.client.request(
+            "PATCH",
+            f"/api/updates/{update_id}",
+            {"text": "The team discussed options without a final choice.", "meetingDate": "2026-06-02"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["decisions"], [])
+
+        suggestions = memory_suggestions_from_notes("The team agreed to use the Redwood design.")
+        self.assertIn("agreed to use the Redwood design", suggestions["decisions"][0])
+
+    def test_manual_decision_can_be_created_updated_and_deleted(self) -> None:
+        status, created = self.client.request(
+            "POST",
+            "/api/decisions",
+            {
+                "projectId": 1,
+                "decisionDate": "2026-06-01",
+                "owner": "Asha Rao",
+                "status": "active",
+                "text": "Use compact action board as the primary action view.",
+            },
+        )
+        self.assertEqual(status, 201)
+        decision_id = created["decision"]["id"]
+        self.assertIsNone(created["decision"]["updateId"])
+        self.assertEqual(created["decision"]["owner"], "Asha Rao")
+        self.assertEqual(created["decision"]["status"], "active")
+
+        status, updated = self.client.request(
+            "PATCH",
+            f"/api/decisions/{decision_id}",
+            {
+                "decisionDate": "2026-06-02",
+                "owner": "Ben Carter",
+                "status": "revisited",
+                "text": "Use Action Board as the primary action view.",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["decision"]["decisionDate"], "2026-06-02")
+        self.assertEqual(updated["decision"]["owner"], "Ben Carter")
+        self.assertEqual(updated["decision"]["status"], "revisited")
+        self.assertEqual(updated["decision"]["text"], "Use Action Board as the primary action view.")
+
+        status, deleted = self.client.request("DELETE", f"/api/decisions/{decision_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["deletedDecision"]["id"], decision_id)
+
+        status, missing = self.client.request("DELETE", f"/api/decisions/{decision_id}")
+        self.assertEqual(status, 404)
+        self.assertEqual(missing["error"], "Decision not found.")
+
+    def test_bug_refresh_returns_rows_without_persisting_them(self) -> None:
         status, refreshed = self.client.request(
             "POST",
             "/api/projects/1/bugs/refresh",
@@ -238,14 +494,16 @@ class ProjectPulseApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual([bug["id"] for bug in refreshed["bugs"]], ["BUG-9001"])
+        self.assertEqual(refreshed["bugs"][0]["projectId"], 1)
+        self.assertIn("refreshedAt", refreshed["bugs"][0])
 
         status, project_one = self.client.request("GET", "/api/projects/1/dashboard")
         self.assertEqual(status, 200)
-        self.assertEqual([bug["id"] for bug in project_one["bugs"]], ["BUG-9001"])
+        self.assertEqual(project_one["bugs"], [])
 
         status, project_two = self.client.request("GET", "/api/projects/2/dashboard")
         self.assertEqual(status, 200)
-        self.assertEqual([bug["id"] for bug in project_two["bugs"]], ["BUG-1502"])
+        self.assertEqual(project_two["bugs"], [])
 
     def test_bug_fetch_uses_backend_url_request(self) -> None:
         with patch(
@@ -381,19 +639,23 @@ class ProjectPulseApiTest(unittest.TestCase):
             "rptno": "39155296",
             "severity": "1, 2",
             "status": "11, 15",
+            "subject": "semantic search",
             "reportedBy": "PARULGU",
             "assignee": "PARULGU",
             "component": "UI",
+            "tag": "regression",
         })
 
         self.assertEqual(payload["query"]["product_id"], "1408")
         self.assertEqual(payload["query"]["rptno"], "39155296")
         self.assertEqual(payload["query"]["severity"], ["1", "2"])
         self.assertEqual(payload["query"]["status"], ["11", "15"])
+        self.assertEqual(payload["query"]["subject"], {"$like": "%semantic search%"})
         self.assertEqual(payload["query"]["reported_by"], "PARULGU")
         self.assertEqual(payload["query"]["assignee"], "PARULGU")
         self.assertEqual(payload["query"]["component"], "UI")
-        self.assertEqual(payload["columns"], ["rptno", "subject", "status", "severity", "product_id", "raw_updated_date", "reported_by", "component", "assignee"])
+        self.assertEqual(payload["query"]["bt_tags"], {"$like": "%regression%"})
+        self.assertEqual(payload["columns"], ["rptno", "subject", "status", "severity", "product_id", "raw_updated_date", "reported_by", "component", "bt_tags", "assignee"])
 
     def test_bugdb_generic_query_uses_mcp_get_bug_report(self) -> None:
         from backend.app import fetch_bugdb_generic_query
@@ -445,7 +707,7 @@ class ProjectPulseApiTest(unittest.TestCase):
     def test_bug_upload_imports_xlsx_rows(self) -> None:
         status, cleared = self.client.request("DELETE", "/api/projects/1/bugs")
         self.assertEqual(status, 200)
-        self.assertGreaterEqual(cleared["deletedBugs"], 1)
+        self.assertEqual(cleared["deletedBugs"], 0)
 
         workbook = make_xlsx(
             [
@@ -493,7 +755,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         updated_by_id = {bug["id"]: bug for bug in updated["bugs"]}
-        self.assertEqual(set(updated_by_id), {"39155296", "38368789"})
+        self.assertEqual(set(updated_by_id), {"39155296"})
         self.assertEqual(updated_by_id["39155296"]["title"], "Updated imported bug")
         self.assertEqual(updated_by_id["39155296"]["assignee"], "Mia Chen")
         self.assertEqual(updated_by_id["39155296"]["priority"], "P0")
@@ -501,7 +763,7 @@ class ProjectPulseApiTest(unittest.TestCase):
 
         status, after_clear = self.client.request("DELETE", "/api/projects/1/bugs")
         self.assertEqual(status, 200)
-        self.assertEqual(after_clear["deletedBugs"], 2)
+        self.assertEqual(after_clear["deletedBugs"], 0)
         status, project_one = self.client.request("GET", "/api/projects/1/dashboard")
         self.assertEqual(status, 200)
         self.assertEqual(project_one["bugs"], [])
@@ -521,27 +783,100 @@ class ProjectPulseApiTest(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(payload["summary"], fake_summary)
-        project, updates, actions = summarize.call_args.args
+        project, updates, actions, bugs = summarize.call_args.args
         self.assertEqual(project["name"], "Customer Portal Launch")
         self.assertGreaterEqual(len(updates), 1)
         self.assertGreaterEqual(len(actions), 1)
+        self.assertIsInstance(bugs, list)
 
         status, bootstrap = self.client.request("GET", "/api/bootstrap")
         self.assertEqual(status, 200)
         self.assertNotIn("summaryModal", bootstrap)
 
-    def test_project_summary_requires_notes(self) -> None:
+    def test_project_summary_requires_data(self) -> None:
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "No Notes", "classification": "Work", "members": ["AA"]},
+            {"name": "No Notes", "classification": "Work", "roleDetails": {"developers": "AA"}},
         )
         self.assertEqual(status, 201)
 
         status, payload = self.client.request("POST", f"/api/projects/{created['project']['id']}/summary")
 
         self.assertEqual(status, 400)
-        self.assertEqual(payload["error"], "No project notes are available to summarize.")
+        self.assertEqual(payload["error"], "No project data is available to summarize.")
+
+    def test_project_summary_allows_action_only_project(self) -> None:
+        status, created = self.client.request(
+            "POST",
+            "/api/projects",
+            {"name": "Action Only", "classification": "Work", "roleDetails": {"developers": "AA"}},
+        )
+        self.assertEqual(status, 201)
+        project_id = created["project"]["id"]
+        status, _action = self.client.request(
+            "POST",
+            "/api/actions",
+            {"projectId": project_id, "title": "Prepare launch checklist", "owner": "AA", "status": "active"},
+        )
+        self.assertEqual(status, 201)
+
+        fake_summary = {
+            "headline": "Action-only summary",
+            "overview": "The project has one active action.",
+            "pending": ["Prepare launch checklist."],
+            "blocked": ["No blocked work is captured."],
+            "done": ["No action items are marked done."],
+            "keyDecisions": ["No key decisions captured yet."],
+        }
+        with patch("backend.app.summarize_project_with_ai", return_value=fake_summary) as summarize:
+            status, payload = self.client.request("POST", f"/api/projects/{project_id}/summary")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["summary"], fake_summary)
+        _project, updates, actions, bugs = summarize.call_args.args
+        self.assertEqual(updates, [])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(bugs, [])
+
+    def test_project_summary_allows_request_bug_only_project(self) -> None:
+        status, created = self.client.request(
+            "POST",
+            "/api/projects",
+            {"name": "Bug Only", "classification": "Work", "roleDetails": {"developers": "AA"}},
+        )
+        self.assertEqual(status, 201)
+        project_id = created["project"]["id"]
+        visible_bugs = [
+            {
+                "assignee": "AA",
+                "id": "BUG-1",
+                "severity": "High",
+                "status": "Open",
+                "title": "Important customer bug",
+            }
+        ]
+        fake_summary = {
+            "headline": "Bug-only summary",
+            "overview": "The project has one visible bug.",
+            "pending": ["No pending action items were found."],
+            "blocked": ["No blocked work is captured."],
+            "done": ["No action items are marked done."],
+            "keyDecisions": ["No key decisions captured yet."],
+        }
+        with patch("backend.app.summarize_project_with_ai", return_value=fake_summary) as summarize:
+            status, payload = self.client.request(
+                "POST",
+                f"/api/projects/{project_id}/summary",
+                {"bugs": visible_bugs},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["summary"], fake_summary)
+        _project, updates, actions, bugs = summarize.call_args.args
+        self.assertEqual(updates, [])
+        self.assertEqual(actions, [])
+        self.assertEqual(bugs, visible_bugs)
 
     def test_summary_payload_enriches_sparse_ai_response(self) -> None:
         fallback = local_project_summary(
@@ -650,7 +985,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(extracted["actions"], [])
         self.assertIn("Matching action items already exist", " ".join(extracted["points"]))
 
-    def test_clean_duplicate_actions_keeps_first_copy(self) -> None:
+    def test_duplicate_action_create_returns_existing_action(self) -> None:
         duplicate = {
             "completionDate": "2026-06-01",
             "owner": "Asha Rao",
@@ -663,14 +998,37 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(status, 201)
         status, second = self.client.request("POST", "/api/actions", duplicate)
         self.assertEqual(status, 201)
+        self.assertEqual(second["action"]["id"], first["action"]["id"])
+        self.assertTrue(second["action"]["duplicate"])
 
         status, cleaned = self.client.request("POST", "/api/projects/1/actions/clean-duplicates")
 
         self.assertEqual(status, 200)
-        self.assertEqual(cleaned["deletedCount"], 1)
+        self.assertEqual(cleaned["deletedCount"], 0)
         action_ids = [action["id"] for action in cleaned["actions"]]
         self.assertIn(first["action"]["id"], action_ids)
-        self.assertNotIn(second["action"]["id"], action_ids)
+
+    def test_bulk_action_create_skips_duplicates(self) -> None:
+        duplicate = {
+            "owner": "Asha Rao",
+            "projectId": 1,
+            "source": "manual",
+            "status": "active",
+            "title": "Send duplicate update",
+        }
+        status, first = self.client.request("POST", "/api/actions", duplicate)
+        self.assertEqual(status, 201)
+
+        status, bulk = self.client.request("POST", "/api/actions/bulk", {"actions": [duplicate]})
+        self.assertEqual(status, 201)
+        self.assertEqual(bulk["actions"], [])
+        self.assertEqual(bulk["skippedDuplicates"], 1)
+
+        status, dashboard = self.client.request("GET", "/api/projects/1/dashboard")
+        self.assertEqual(status, 200)
+        matching = [action for action in dashboard["actions"] if action["title"] == duplicate["title"]]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["id"], first["action"]["id"])
 
     def test_ai_extraction_infers_owner_from_notes(self) -> None:
         fake_ai_payload = {
@@ -712,7 +1070,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Generic Title Test", "classification": "Work", "members": ["AA", "BB"]},
+            {"name": "Generic Title Test", "classification": "Work", "roleDetails": {"developers": "AA, BB"}},
         )
         self.assertEqual(status, 201)
         project_id = created["project"]["id"]
@@ -738,7 +1096,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Fallback Test", "classification": "Work", "members": ["AA"]},
+            {"name": "Fallback Test", "classification": "Work", "roleDetails": {"developers": "AA"}},
         )
         self.assertEqual(status, 201)
         project_id = created["project"]["id"]
@@ -760,7 +1118,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Review Before Add", "classification": "Work", "members": ["AA"]},
+            {"name": "Review Before Add", "classification": "Work", "roleDetails": {"developers": "AA"}},
         )
         self.assertEqual(status, 201)
         project_id = created["project"]["id"]
@@ -806,7 +1164,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Next Action Test", "classification": "Work", "members": ["Parul"]},
+            {"name": "Next Action Test", "classification": "Work", "roleDetails": {"developers": "Parul"}},
         )
         self.assertEqual(status, 201)
         project_id = created["project"]["id"]
@@ -840,7 +1198,7 @@ class ProjectPulseApiTest(unittest.TestCase):
             {
                 "name": "Structured Notes Test",
                 "classification": "Work",
-                "members": ["Sreenath", "Surya", "Kriti", "Umesha"],
+                "roleDetails": {"developers": "Sreenath, Surya, Kriti, Umesha"},
             },
         )
         self.assertEqual(status, 201)
@@ -891,7 +1249,7 @@ class ProjectPulseApiTest(unittest.TestCase):
             {
                 "name": "Owner Heading Notes Test",
                 "classification": "Work",
-                "members": ["Govindraja", "Kriti", "Lalit", "Mamatha", "Rajani", "Rakesh", "Umesha"],
+                "roleDetails": {"developers": "Govindraja, Kriti, Lalit, Mamatha, Rajani, Rakesh, Umesha"},
             },
         )
         self.assertEqual(status, 201)
@@ -975,7 +1333,7 @@ class ProjectPulseApiTest(unittest.TestCase):
             {
                 "name": "Collapsed Notes Test",
                 "classification": "Work",
-                "members": ["Sreenath", "Surya", "Kriti", "Umesha"],
+                "roleDetails": {"developers": "Sreenath, Surya, Kriti, Umesha"},
             },
         )
         self.assertEqual(status, 201)
@@ -1017,7 +1375,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         status, created = self.client.request(
             "POST",
             "/api/projects",
-            {"name": "Weak AI Test", "classification": "Work", "members": ["Sreenath", "Kriti"]},
+            {"name": "Weak AI Test", "classification": "Work", "roleDetails": {"developers": "Sreenath, Kriti"}},
         )
         self.assertEqual(status, 201)
         project_id = created["project"]["id"]

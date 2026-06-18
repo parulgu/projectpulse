@@ -168,12 +168,21 @@ AI_EXTRACTION_SCHEMA = {
 }
 
 AI_PROJECT_SUMMARY_SCHEMA = {
-    "title": "ProjectStatusSummary",
-    "description": "A concise project status summary from saved project notes and action items.",
+    "title": "ExecutiveProjectStatusSummary",
+    "description": "An executive, customer-ready project status report from saved project notes and action items.",
     "type": "object",
     "properties": {
-        "headline": {"type": "string", "description": "Short summary title."},
-        "overview": {"type": "string", "description": "One concise paragraph summarizing project status."},
+        "headline": {"type": "string", "description": "Short status report title."},
+        "status": {
+            "type": "string",
+            "description": "Overall status. Use Green, Yellow, or Red.",
+        },
+        "statusReason": {
+            "type": "string",
+            "description": "Concise reason for the status using concrete project signals.",
+        },
+        "reportDate": {"type": "string", "description": "Report date as YYYY-MM-DD."},
+        "overview": {"type": "string", "description": "One customer-ready paragraph summarizing project status."},
         "pending": {
             "type": "array",
             "items": {"type": "string"},
@@ -194,8 +203,99 @@ AI_PROJECT_SUMMARY_SCHEMA = {
             "items": {"type": "string"},
             "description": "Key decisions, agreements, approvals, or choices captured in project notes.",
         },
+        "risks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Risks, dependencies, or issues that could affect delivery.",
+        },
+        "nextSteps": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Recommended next steps or asks for the upcoming update cycle.",
+        },
+        "customerAsks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Customer asks, approvals, inputs, or decisions needed from customer or stakeholders.",
+        },
     },
-    "required": ["headline", "overview", "pending", "blocked", "done", "keyDecisions"],
+    "required": [
+        "headline",
+        "status",
+        "statusReason",
+        "reportDate",
+        "overview",
+        "pending",
+        "blocked",
+        "done",
+        "keyDecisions",
+        "risks",
+        "nextSteps",
+        "customerAsks",
+    ],
+}
+
+AI_PROJECT_MEMORY_QA_SCHEMA = {
+    "title": "ProjectMemoryAnswer",
+    "description": "Answer to a project memory question using only provided project data.",
+    "type": "object",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": "Concise answer grounded in project notes, decisions, actions, and milestones.",
+        },
+        "sources": {
+            "type": "array",
+            "description": "Source snippets used to answer.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "text": {"type": "string"},
+                },
+                "required": ["label", "text"],
+            },
+        },
+    },
+    "required": ["answer", "sources"],
+}
+
+AI_FOLLOWUP_SCHEMA = {
+    "title": "ProjectFollowUpDetection",
+    "description": "Repeated unresolved project follow-ups detected across notes, decisions, and actions.",
+    "type": "object",
+    "properties": {
+        "followUps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "integer"},
+                    "topic": {"type": "string"},
+                    "signal": {"type": "string"},
+                    "flags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "repeated_blocker",
+                                "repeated_customer_ask",
+                                "decision_pending",
+                            ],
+                        },
+                    },
+                    "suggestedAction": {"type": "string"},
+                    "actionId": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "description": "Existing action id when this follow-up is about an existing action.",
+                    },
+                },
+                "required": ["projectId", "topic", "signal", "flags", "suggestedAction"],
+            },
+        }
+    },
+    "required": ["followUps"],
 }
 
 SEED_PROJECTS = [
@@ -278,10 +378,12 @@ BUGDB_QUERY_COLUMNS = [
     "raw_updated_date",
     "reported_by",
     "component",
+    "bt_tags",
     "assignee",
 ]
 BUGDB_QUERY_FIELDS = {
     "assignee": "assignee",
+    "bt_tags": "bt_tags",
     "component": "component",
     "productId": "product_id",
     "product_id": "product_id",
@@ -290,7 +392,55 @@ BUGDB_QUERY_FIELDS = {
     "rptno": "rptno",
     "severity": "severity",
     "status": "status",
+    "subject": "subject",
+    "tag": "bt_tags",
+    "tags": "bt_tags",
 }
+BUGDB_LIKE_QUERY_FIELDS = {"subject", "tag", "tags", "bt_tags"}
+
+PROJECT_ROLE_FIELDS = [
+    "deliveryManager",
+    "developers",
+    "qaMembers",
+    "productManager",
+    "designers",
+]
+PROJECT_METADATA_FIELDS = {"epic", "targetRelease"}
+
+DEFAULT_PROJECT_ROLES = {field: "" for field in PROJECT_ROLE_FIELDS}
+
+DEFAULT_PHASE_TEMPLATE = [
+    {
+        "name": "Discovery",
+        "milestone": "Discovery complete",
+        "items": ["Problem statement", "Resource identified", "Success criteria", "Initial risks", "Planning"],
+    },
+    {
+        "name": "Requirements",
+        "milestone": "Requirements complete",
+        "items": ["Scope", "Estimates", "Dependencies", "Delivery risks"],
+    },
+    {
+        "name": "Implementation",
+        "milestone": "Implementation complete",
+        "items": ["Architecture", "API design", "Repository Changes", "Code Changes", "Security"],
+    },
+    {
+        "name": "Delivery",
+        "milestone": "Delivery complete",
+        "items": ["Code review", "Unit testing", "PSRTesting", "BOM Updates"],
+    },
+    {
+        "name": "QA testing",
+        "milestone": "QA testing complete",
+        "items": ["Regression", "Feature testing", "Bug testing"],
+    },
+    {
+        "name": "Delivery",
+        "milestone": "Release delivery complete",
+        "items": ["Release notes", "Bookshelf Update"],
+    },
+]
 
 
 class ApiError(Exception):
@@ -322,6 +472,10 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
               classification TEXT NOT NULL DEFAULT 'work',
               owner TEXT,
               summary TEXT NOT NULL DEFAULT '',
+              archived_at TEXT,
+              epic TEXT NOT NULL DEFAULT '',
+              target_release TEXT NOT NULL DEFAULT '',
+              role_details_json TEXT NOT NULL DEFAULT '{}',
               created_at TEXT NOT NULL
             );
 
@@ -355,6 +509,17 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS decisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              update_id INTEGER REFERENCES updates(id) ON DELETE CASCADE,
+              text TEXT NOT NULL,
+              decision_date TEXT,
+              owner TEXT,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS bugs (
               id TEXT NOT NULL,
               project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -377,17 +542,55 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
               updated_at TEXT NOT NULL,
               UNIQUE(project_id, name)
             );
+
+            CREATE TABLE IF NOT EXISTS project_phases (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              milestone TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS phase_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              phase_id INTEGER NOT NULL REFERENCES project_phases(id) ON DELETE CASCADE,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              completed INTEGER NOT NULL DEFAULT 0,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_links (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              address TEXT NOT NULL DEFAULT '',
+              link_text TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
             """
         )
         ensure_column(connection, "actions", "completion_date", "TEXT")
         ensure_column(connection, "actions", "meeting_date", "TEXT")
         ensure_column(connection, "updates", "meeting_date", "TEXT")
+        ensure_column(connection, "decisions", "owner", "TEXT")
+        ensure_column(connection, "decisions", "status", "TEXT NOT NULL DEFAULT 'active'")
+        ensure_column(connection, "projects", "archived_at", "TEXT")
+        ensure_column(connection, "projects", "epic", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "projects", "target_release", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(connection, "projects", "role_details_json", "TEXT NOT NULL DEFAULT '{}'")
+        clean_project_metadata_from_roles(connection)
+        ensure_project_links_schema(connection)
         ensure_column(connection, "bugs", "priority", "TEXT")
         ensure_column(connection, "bugs", "fields_json", "TEXT")
         backfill_action_meeting_dates(connection)
 
         if seed and connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
             seed_database(connection)
+        backfill_default_phases(connection)
 
 
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -420,6 +623,82 @@ def backfill_action_meeting_dates(connection: sqlite3.Connection) -> None:
           )
         """
     )
+
+
+def clean_project_metadata_from_roles(connection: sqlite3.Connection) -> None:
+    for project in connection.execute("SELECT id, epic, role_details_json FROM projects"):
+        try:
+            role_details = json.loads(project["role_details_json"] or "{}")
+        except json.JSONDecodeError:
+            role_details = {}
+        if not isinstance(role_details, dict):
+            role_details = {}
+
+        cleaned_roles = {
+            str(key): value
+            for key, value in role_details.items()
+            if normalize_name(str(key)) not in PROJECT_METADATA_FIELDS
+        }
+        if cleaned_roles != role_details:
+            connection.execute(
+                "UPDATE projects SET role_details_json = ? WHERE id = ?",
+                (json.dumps(cleaned_roles), project["id"]),
+            )
+
+
+def ensure_project_links_schema(connection: sqlite3.Connection) -> None:
+    columns = [row["name"] for row in connection.execute("PRAGMA table_info(project_links)")]
+    expected_columns = ["id", "project_id", "name", "address", "link_text", "sort_order", "created_at"]
+    if columns == expected_columns:
+        return
+
+    connection.execute("DROP TABLE project_links")
+    connection.execute(
+        """
+        CREATE TABLE project_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          address TEXT NOT NULL DEFAULT '',
+          link_text TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def backfill_default_phases(connection: sqlite3.Connection) -> None:
+    for project in connection.execute("SELECT id FROM projects"):
+        ensure_default_phases(connection, project["id"])
+
+
+def ensure_default_phases(connection: sqlite3.Connection, project_id: int) -> None:
+    existing_count = connection.execute(
+        "SELECT COUNT(*) FROM project_phases WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()[0]
+    if existing_count:
+        return
+
+    timestamp = now_iso()
+    for phase_index, phase in enumerate(DEFAULT_PHASE_TEMPLATE):
+        cursor = connection.execute(
+            """
+            INSERT INTO project_phases (project_id, name, milestone, sort_order, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (project_id, phase["name"], phase["milestone"], phase_index, timestamp),
+        )
+        phase_id = cursor.lastrowid
+        for item_index, item in enumerate(phase["items"]):
+            connection.execute(
+                """
+                INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
+                VALUES (?, ?, ?, 0, ?, ?)
+                """,
+                (phase_id, project_id, item, item_index, timestamp),
+            )
 
 
 def seed_database(connection: sqlite3.Connection) -> None:
@@ -904,13 +1183,27 @@ def row_to_project(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
             (row["id"],),
         )
     ]
+    try:
+        role_details = json.loads(row["role_details_json"] or "{}")
+    except json.JSONDecodeError:
+        role_details = {}
+    if not isinstance(role_details, dict):
+        role_details = {}
+    normalized_role_details = {
+        **DEFAULT_PROJECT_ROLES,
+        **{str(key): str(value or "") for key, value in role_details.items() if str(key).strip()},
+    }
     return {
         "id": row["id"],
         "name": row["name"],
         "classification": row["classification"],
         "owner": None,
         "summary": row["summary"],
+        "epic": normalize_name(row["epic"]),
+        "targetRelease": normalize_name(row["target_release"]),
         "members": members,
+        "roleDetails": normalized_role_details,
+        "archivedAt": row["archived_at"],
     }
 
 
@@ -941,6 +1234,19 @@ def row_to_update(row: sqlite3.Row) -> dict:
     }
 
 
+def row_to_decision(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "updateId": row["update_id"],
+        "text": row["text"],
+        "decisionDate": row["decision_date"],
+        "owner": row["owner"],
+        "status": row["status"] or "active",
+        "createdAt": row["created_at"],
+    }
+
+
 def row_to_bug(row: sqlite3.Row) -> dict:
     try:
         fields = json.loads(row["fields_json"] or "{}")
@@ -967,6 +1273,7 @@ def row_to_bug(row: sqlite3.Row) -> dict:
         "priority": row["priority"] or "",
         "fields": fields,
         "projectId": row["project_id"],
+        "refreshedAt": row["refreshed_at"],
     }
 
 
@@ -984,6 +1291,66 @@ def row_to_bug_query(row: sqlite3.Row) -> dict:
         "query": query,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+    }
+
+
+def phase_status(items: list[dict]) -> str:
+    if not items:
+        return "not_started"
+    if all(item["completed"] for item in items):
+        return "done"
+    if any(item["completed"] for item in items):
+        return "in_progress"
+    return "not_started"
+
+
+def row_to_phase_item(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "phaseId": row["phase_id"],
+        "projectId": row["project_id"],
+        "title": row["title"],
+        "completed": bool(row["completed"]),
+        "sortOrder": row["sort_order"],
+        "createdAt": row["created_at"],
+    }
+
+
+def row_to_phase(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    items = [
+        row_to_phase_item(item)
+        for item in connection.execute(
+            "SELECT * FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
+            (row["id"],),
+        )
+    ]
+    done_count = sum(1 for item in items if item["completed"])
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "name": row["name"],
+        "milestone": row["milestone"],
+        "sortOrder": row["sort_order"],
+        "status": phase_status(items),
+        "progress": round((done_count / len(items)) * 100) if items else 0,
+        "completedCount": done_count,
+        "totalCount": len(items),
+        "items": items,
+        "createdAt": row["created_at"],
+    }
+
+
+def row_to_project_link(row: sqlite3.Row) -> dict:
+    address = normalize_name(row["address"])
+    link_text = normalize_name(row["link_text"])
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "name": row["name"],
+        "address": address,
+        "linkText": link_text,
+        "sortOrder": row["sort_order"],
+        "createdAt": row["created_at"],
     }
 
 
@@ -1017,12 +1384,435 @@ def list_updates(connection: sqlite3.Connection, project_id: int | None = None) 
     return [row_to_update(row) for row in rows]
 
 
-def list_bugs(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
+def list_decisions(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
     if project_id is None:
-        rows = connection.execute("SELECT * FROM bugs ORDER BY project_id, id")
+        rows = connection.execute("SELECT * FROM decisions ORDER BY project_id, id")
     else:
-        rows = connection.execute("SELECT * FROM bugs WHERE project_id = ? ORDER BY id", (project_id,))
-    return [row_to_bug(row) for row in rows]
+        rows = connection.execute("SELECT * FROM decisions WHERE project_id = ? ORDER BY id", (project_id,))
+    return [row_to_decision(row) for row in rows]
+
+
+def list_phases(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
+    if project_id is None:
+        rows = connection.execute("SELECT * FROM project_phases ORDER BY project_id, sort_order, id")
+    else:
+        ensure_default_phases(connection, project_id)
+        rows = connection.execute(
+            "SELECT * FROM project_phases WHERE project_id = ? ORDER BY sort_order, id",
+            (project_id,),
+        )
+    return [row_to_phase(connection, row) for row in rows]
+
+
+def list_project_links(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
+    if project_id is None:
+        rows = connection.execute("SELECT * FROM project_links ORDER BY project_id, sort_order, id")
+    else:
+        rows = connection.execute(
+            "SELECT * FROM project_links WHERE project_id = ? ORDER BY sort_order, id",
+            (project_id,),
+        )
+    return [row_to_project_link(row) for row in rows]
+
+
+def project_members_from_roles(role_details: dict) -> list[str]:
+    people_fields = ["deliveryManager", "developers", "qaMembers", "productManager", "designers"]
+    custom_people = [
+        str(value or "")
+        for key, value in role_details.items()
+        if key not in PROJECT_ROLE_FIELDS
+    ]
+    return parse_members(",".join([*(str(role_details.get(field) or "") for field in people_fields), *custom_people]))
+
+
+def normalize_role_details(payload: dict) -> dict:
+    role_details = payload.get("roleDetails") or payload
+    if not isinstance(role_details, dict):
+        role_details = {}
+    normalized = {field: normalize_name(role_details.get(field)) for field in PROJECT_ROLE_FIELDS}
+    for key, value in role_details.items():
+        normalized_key = normalize_name(str(key))
+        if not normalized_key or normalized_key in PROJECT_ROLE_FIELDS or normalized_key in PROJECT_METADATA_FIELDS:
+            continue
+        normalized_value = normalize_name(value)
+        if normalized_value:
+            normalized[normalized_key] = normalized_value
+    return normalized
+
+
+def replace_project_members_from_roles(connection: sqlite3.Connection, project_id: int, role_details: dict) -> None:
+    members = project_members_from_roles(role_details)
+    connection.execute("DELETE FROM project_members WHERE project_id = ?", (project_id,))
+    for member in members:
+        connection.execute(
+            "INSERT OR IGNORE INTO project_members (project_id, name) VALUES (?, ?)",
+            (project_id, member),
+        )
+    if members:
+        placeholders = ",".join("?" for _ in members)
+        connection.execute(
+            f"""
+            UPDATE actions
+            SET owner = NULL
+            WHERE project_id = ?
+              AND owner IS NOT NULL
+              AND owner NOT IN ({placeholders})
+            """,
+            (project_id, *members),
+        )
+    else:
+        connection.execute("UPDATE actions SET owner = NULL WHERE project_id = ?", (project_id,))
+
+
+def update_project_details(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
+    project = require_project(connection, project_id)
+    classification = normalize_classification(payload.get("classification", project["classification"]))
+    current_project = row_to_project(connection, project)
+    role_details_payload = payload.get("roleDetails") if "roleDetails" in payload else None
+    role_details = normalize_role_details(role_details_payload) if role_details_payload is not None else current_project["roleDetails"]
+    epic = normalize_name(payload.get("epic")) if "epic" in payload else current_project["epic"]
+    target_release = (
+        normalize_name(payload.get("targetRelease"))
+        if "targetRelease" in payload
+        else current_project["targetRelease"]
+    )
+    connection.execute(
+        "UPDATE projects SET classification = ?, epic = ?, target_release = ?, role_details_json = ? WHERE id = ?",
+        (classification, epic, target_release, json.dumps(role_details), project_id),
+    )
+    replace_project_members_from_roles(connection, project_id, role_details)
+    return row_to_project(connection, require_project(connection, project_id))
+
+
+def next_sort_order(connection: sqlite3.Connection, table: str, where_column: str, where_id: int) -> int:
+    row = connection.execute(
+        f"SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM {table} WHERE {where_column} = ?",
+        (where_id,),
+    ).fetchone()
+    return int(row["next_order"])
+
+
+def create_phase(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
+    require_project(connection, project_id)
+    name = normalize_name(payload.get("name"))
+    if not name:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase name is required.")
+    milestone = normalize_name(payload.get("milestone")) or f"{name} complete"
+    sort_order = next_sort_order(connection, "project_phases", "project_id", project_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO project_phases (project_id, name, milestone, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (project_id, name, milestone, sort_order, now_iso()),
+    )
+    phase_id = cursor.lastrowid
+    raw_items = payload.get("items") or []
+    if isinstance(raw_items, str):
+        raw_items = [item.strip() for item in raw_items.splitlines()]
+    for item_index, item in enumerate(raw_items):
+        title = normalize_name(item.get("title") if isinstance(item, dict) else item)
+        if not title:
+            continue
+        connection.execute(
+            """
+            INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
+            VALUES (?, ?, ?, 0, ?, ?)
+            """,
+            (phase_id, project_id, title, item_index, now_iso()),
+        )
+    created = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    return row_to_phase(connection, created)
+
+
+def update_phase(connection: sqlite3.Connection, phase_id: int, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
+    name = normalize_name(payload.get("name")) if "name" in payload else existing["name"]
+    if not name:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase name is required.")
+    milestone = normalize_name(payload.get("milestone")) if "milestone" in payload else existing["milestone"]
+    connection.execute(
+        "UPDATE project_phases SET name = ?, milestone = ? WHERE id = ?",
+        (name, milestone or f"{name} complete", phase_id),
+    )
+    updated = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    return row_to_phase(connection, updated)
+
+
+def move_phase(connection: sqlite3.Connection, phase_id: int, direction: str) -> dict:
+    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
+    if direction not in {"up", "down"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase direction must be up or down.")
+
+    comparator = "<" if direction == "up" else ">"
+    order_direction = "DESC" if direction == "up" else "ASC"
+    neighbor = connection.execute(
+        f"""
+        SELECT * FROM project_phases
+        WHERE project_id = ? AND sort_order {comparator} ?
+        ORDER BY sort_order {order_direction}, id {order_direction}
+        LIMIT 1
+        """,
+        (existing["project_id"], existing["sort_order"]),
+    ).fetchone()
+    if not neighbor:
+        return row_to_phase(connection, existing)
+
+    connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (neighbor["sort_order"], existing["id"]))
+    connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (existing["sort_order"], neighbor["id"]))
+    updated = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    return row_to_phase(connection, updated)
+
+
+def reorder_phases(connection: sqlite3.Connection, project_id: int, payload: dict) -> list[dict]:
+    require_project(connection, project_id)
+    raw_ids = payload.get("ids") if isinstance(payload, dict) else []
+    ordered_ids = [int(value) for value in raw_ids or []]
+    existing_ids = [
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM project_phases WHERE project_id = ? ORDER BY sort_order, id",
+            (project_id,),
+        )
+    ]
+    existing_set = set(existing_ids)
+    ordered_ids = [phase_id for phase_id in ordered_ids if phase_id in existing_set]
+    ordered_ids.extend(phase_id for phase_id in existing_ids if phase_id not in ordered_ids)
+    for sort_order, phase_id in enumerate(ordered_ids):
+        connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (sort_order, phase_id))
+    return list_phases(connection, project_id)
+
+
+def delete_phase(connection: sqlite3.Connection, phase_id: int) -> dict:
+    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
+    deleted_phase = row_to_phase(connection, existing)
+    connection.execute("DELETE FROM project_phases WHERE id = ?", (phase_id,))
+    return {"deletedPhase": deleted_phase}
+
+
+def create_phase_item(connection: sqlite3.Connection, phase_id: int, payload: dict) -> dict:
+    phase = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    if not phase:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
+    title = normalize_name(payload.get("title"))
+    if not title:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype title is required.")
+    sort_order = next_sort_order(connection, "phase_items", "phase_id", phase_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (phase_id, phase["project_id"], title, 1 if payload.get("completed") else 0, sort_order, now_iso()),
+    )
+    created = connection.execute("SELECT * FROM phase_items WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return row_to_phase_item(created)
+
+
+def update_phase_item(connection: sqlite3.Connection, item_id: int, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
+    title = normalize_name(payload.get("title")) if "title" in payload else existing["title"]
+    if not title:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype title is required.")
+    completed = 1 if payload.get("completed", bool(existing["completed"])) else 0
+    connection.execute(
+        "UPDATE phase_items SET title = ?, completed = ? WHERE id = ?",
+        (title, completed, item_id),
+    )
+    updated = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
+    return row_to_phase_item(updated)
+
+
+def move_phase_item(connection: sqlite3.Connection, item_id: int, direction: str) -> dict:
+    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
+    if direction not in {"up", "down"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype direction must be up or down.")
+
+    comparator = "<" if direction == "up" else ">"
+    order_direction = "DESC" if direction == "up" else "ASC"
+    neighbor = connection.execute(
+        f"""
+        SELECT * FROM phase_items
+        WHERE phase_id = ? AND sort_order {comparator} ?
+        ORDER BY sort_order {order_direction}, id {order_direction}
+        LIMIT 1
+        """,
+        (existing["phase_id"], existing["sort_order"]),
+    ).fetchone()
+    if not neighbor:
+        return row_to_phase_item(existing)
+
+    connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (neighbor["sort_order"], existing["id"]))
+    connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (existing["sort_order"], neighbor["id"]))
+    updated = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
+    return row_to_phase_item(updated)
+
+
+def reorder_phase_items(connection: sqlite3.Connection, phase_id: int, payload: dict) -> list[dict]:
+    phase = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+    if not phase:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
+    raw_ids = payload.get("ids") if isinstance(payload, dict) else []
+    ordered_ids = [int(value) for value in raw_ids or []]
+    existing_ids = [
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
+            (phase_id,),
+        )
+    ]
+    existing_set = set(existing_ids)
+    ordered_ids = [item_id for item_id in ordered_ids if item_id in existing_set]
+    ordered_ids.extend(item_id for item_id in existing_ids if item_id not in ordered_ids)
+    for sort_order, item_id in enumerate(ordered_ids):
+        connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (sort_order, item_id))
+    return [
+        row_to_phase_item(row)
+        for row in connection.execute(
+            "SELECT * FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
+            (phase_id,),
+        )
+    ]
+
+
+def delete_phase_item(connection: sqlite3.Connection, item_id: int) -> dict:
+    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
+    deleted_item = row_to_phase_item(existing)
+    connection.execute("DELETE FROM phase_items WHERE id = ?", (item_id,))
+    return {"deletedPhaseItem": deleted_item}
+
+
+def create_project_link(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
+    require_project(connection, project_id)
+    name = normalize_name(payload.get("name"))
+    address = normalize_name(payload.get("address"))
+    link_text = normalize_name(payload.get("linkText"))
+    if not name or not address or not link_text:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Link name, address, and link text are required.")
+    sort_order = next_sort_order(connection, "project_links", "project_id", project_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO project_links (project_id, name, address, link_text, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (project_id, name, address, link_text, sort_order, now_iso()),
+    )
+    created = connection.execute("SELECT * FROM project_links WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return row_to_project_link(created)
+
+
+def update_project_link(connection: sqlite3.Connection, link_id: int, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM project_links WHERE id = ?", (link_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Useful link not found.")
+    name = normalize_name(payload.get("name")) if "name" in payload else existing["name"]
+    address = (
+        normalize_name(payload.get("address"))
+        if "address" in payload
+        else normalize_name(existing["address"])
+    )
+    link_text = (
+        normalize_name(payload.get("linkText"))
+        if "linkText" in payload
+        else normalize_name(existing["link_text"])
+    )
+    if not name or not address or not link_text:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Link name, address, and link text are required.")
+    connection.execute(
+        "UPDATE project_links SET name = ?, address = ?, link_text = ? WHERE id = ?",
+        (name, address, link_text, link_id),
+    )
+    updated = connection.execute("SELECT * FROM project_links WHERE id = ?", (link_id,)).fetchone()
+    return row_to_project_link(updated)
+
+
+def delete_project_link(connection: sqlite3.Connection, link_id: int) -> dict:
+    existing = connection.execute("SELECT * FROM project_links WHERE id = ?", (link_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Useful link not found.")
+    deleted_link = row_to_project_link(existing)
+    connection.execute("DELETE FROM project_links WHERE id = ?", (link_id,))
+    return {"deletedProjectLink": deleted_link}
+
+
+def create_decision(connection: sqlite3.Connection, payload: dict) -> dict:
+    project_id = int(payload.get("projectId") or payload.get("project_id") or 0)
+    require_project(connection, project_id)
+
+    text = normalize_name(payload.get("text"))
+    if not text:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Decision text is required.")
+
+    decision_date = normalize_date(
+        payload.get("decisionDate") or payload.get("decision_date"),
+        "Decision date",
+    )
+    owner = normalize_name(payload.get("owner")) or None
+    status = normalize_name(payload.get("status")) or "active"
+    if status not in {"active", "revisited", "reversed"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Decision status must be active, revisited, or reversed.")
+    cursor = connection.execute(
+        """
+        INSERT INTO decisions (project_id, update_id, text, decision_date, owner, status, created_at)
+        VALUES (?, NULL, ?, ?, ?, ?, ?)
+        """,
+        (project_id, text, decision_date, owner, status, now_iso()),
+    )
+    created = connection.execute("SELECT * FROM decisions WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return row_to_decision(created)
+
+
+def update_decision(connection: sqlite3.Connection, decision_id: int, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Decision not found.")
+
+    text = normalize_name(payload.get("text")) if "text" in payload else existing["text"]
+    if not text:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Decision text is required.")
+
+    decision_date = (
+        normalize_date(payload.get("decisionDate") or payload.get("decision_date"), "Decision date")
+        if "decisionDate" in payload or "decision_date" in payload
+        else existing["decision_date"]
+    )
+    owner = normalize_name(payload.get("owner")) if "owner" in payload else existing["owner"]
+    owner = owner or None
+    status = normalize_name(payload.get("status")) if "status" in payload else (existing["status"] or "active")
+    if status not in {"active", "revisited", "reversed"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Decision status must be active, revisited, or reversed.")
+    connection.execute(
+        "UPDATE decisions SET text = ?, decision_date = ?, owner = ?, status = ? WHERE id = ?",
+        (text, decision_date, owner, status, decision_id),
+    )
+    updated = connection.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+    return row_to_decision(updated)
+
+
+def delete_decision(connection: sqlite3.Connection, decision_id: int) -> dict:
+    existing = connection.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+    if not existing:
+        raise ApiError(HTTPStatus.NOT_FOUND, "Decision not found.")
+
+    deleted_decision = row_to_decision(existing)
+    connection.execute("DELETE FROM decisions WHERE id = ?", (decision_id,))
+    return {"deletedDecision": deleted_decision}
+
+
+def list_bugs(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
+    return []
 
 
 def list_bug_queries(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
@@ -1041,25 +1831,24 @@ def create_project(connection: sqlite3.Connection, payload: dict) -> dict:
     if not name:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Project name is required.")
 
-    members = parse_members(payload.get("members", []))
     classification = normalize_classification(payload.get("classification"))
+    epic = normalize_name(payload.get("epic"))
+    target_release = normalize_name(payload.get("targetRelease"))
+    role_details = normalize_role_details(payload.get("roleDetails") or {})
     summary = normalize_name(payload.get("summary")) or ""
 
     cursor = connection.execute(
         """
-        INSERT INTO projects (name, classification, owner, summary, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO projects (name, classification, owner, summary, epic, target_release, role_details_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (name, classification, None, summary, now_iso()),
+        (name, classification, None, summary, epic, target_release, json.dumps(role_details), now_iso()),
     )
     project_id = cursor.lastrowid
 
-    for member in members:
-        connection.execute(
-            "INSERT OR IGNORE INTO project_members (project_id, name) VALUES (?, ?)",
-            (project_id, member),
-        )
+    replace_project_members_from_roles(connection, project_id, role_details)
 
+    ensure_default_phases(connection, project_id)
     return row_to_project(connection, require_project(connection, project_id))
 
 
@@ -1084,6 +1873,11 @@ def replace_project_members(connection: sqlite3.Connection, project_id: int, pay
     project = require_project(connection, project_id)
     raw_members = payload.get("members", []) if isinstance(payload, dict) else payload
     members = parse_members(raw_members)
+    classification = (
+        normalize_classification(payload.get("classification", project["classification"]))
+        if isinstance(payload, dict)
+        else project["classification"]
+    )
 
     connection.execute("DELETE FROM project_members WHERE project_id = ?", (project_id,))
     for member in members:
@@ -1092,7 +1886,10 @@ def replace_project_members(connection: sqlite3.Connection, project_id: int, pay
             (project_id, member),
         )
 
-    connection.execute("UPDATE projects SET owner = NULL WHERE id = ?", (project_id,))
+    connection.execute(
+        "UPDATE projects SET classification = ?, owner = NULL WHERE id = ?",
+        (classification, project_id),
+    )
     if members:
         placeholders = ",".join("?" for _ in members)
         connection.execute(
@@ -1118,6 +1915,15 @@ def delete_project(connection: sqlite3.Connection, project_id: int) -> dict:
     return {"deletedProject": deleted_project}
 
 
+def archive_project(connection: sqlite3.Connection, project_id: int, archived: bool = True) -> dict:
+    require_project(connection, project_id)
+    connection.execute(
+        "UPDATE projects SET archived_at = ? WHERE id = ?",
+        (now_iso() if archived else None, project_id),
+    )
+    return {"project": row_to_project(connection, require_project(connection, project_id))}
+
+
 def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
     project_id = int(payload.get("projectId") or payload.get("project_id") or 0)
     require_project(connection, project_id)
@@ -1138,6 +1944,18 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
         payload.get("meetingDate") or payload.get("meeting_date"),
         "Meeting date",
     )
+    owner = normalize_name(payload.get("owner")) or None
+    dedupe_key = action_dedupe_key(title, owner)
+    existing_rows = connection.execute(
+        "SELECT * FROM actions WHERE project_id = ? ORDER BY id",
+        (project_id,),
+    ).fetchall()
+    for existing in existing_rows:
+        if action_dedupe_key(existing["title"], existing["owner"]) == dedupe_key:
+            duplicate_action = row_to_action(existing)
+            duplicate_action["duplicate"] = True
+            return duplicate_action
+
     cursor = connection.execute(
         """
         INSERT INTO actions (project_id, title, owner, status, source, completion_date, meeting_date, created_at)
@@ -1146,7 +1964,7 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
         (
             project_id,
             title,
-            normalize_name(payload.get("owner")) or None,
+            owner,
             status,
             normalize_name(payload.get("source")) or "manual",
             completion_date,
@@ -1155,7 +1973,9 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
         ),
     )
     row = connection.execute("SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)).fetchone()
-    return row_to_action(row)
+    action = row_to_action(row)
+    action["duplicate"] = False
+    return action
 
 
 def update_action(connection: sqlite3.Connection, action_id: int, payload: dict) -> dict:
@@ -1229,6 +2049,58 @@ def clean_duplicate_actions(connection: sqlite3.Connection, project_id: int) -> 
     }
 
 
+def extract_decisions_from_text(text: str) -> list[str]:
+    decision_pattern = re.compile(
+        r"\b(decided|decision|agreed|approved|confirmed|chose|chosen|selected|finalized|committed|go with)\b",
+        flags=re.IGNORECASE,
+    )
+    candidates = []
+    for part in re.split(r"(?:\n+|(?<=[.!?])\s+)", text):
+        candidate = compact_summary_text(part, 240)
+        if candidate and decision_pattern.search(candidate):
+            candidates.append(candidate)
+    return dedupe_summary_items(candidates)
+
+
+def extract_risks_and_blockers_from_text(text: str) -> list[str]:
+    blocker_pattern = re.compile(
+        r"\b(blocked|blocker|blocking|risk|at risk|dependency|depends on|waiting for|issue|concern|delay|delayed|stuck)\b",
+        flags=re.IGNORECASE,
+    )
+    candidates = []
+    for part in re.split(r"(?:\n+|(?<=[.!?])\s+)", text):
+        candidate = compact_summary_text(part, 240)
+        if candidate and blocker_pattern.search(candidate):
+            candidates.append(candidate)
+    return dedupe_summary_items(candidates)
+
+
+def memory_suggestions_from_notes(text: str) -> dict:
+    return {
+        "decisions": extract_decisions_from_text(text)[:8],
+        "blockers": extract_risks_and_blockers_from_text(text)[:8],
+    }
+
+
+def replace_decisions_for_update(
+    connection: sqlite3.Connection,
+    project_id: int,
+    update_id: int,
+    text: str,
+    decision_date: str | None,
+) -> None:
+    connection.execute("DELETE FROM decisions WHERE update_id = ?", (update_id,))
+    timestamp = now_iso()
+    for decision in extract_decisions_from_text(text):
+        connection.execute(
+            """
+            INSERT INTO decisions (project_id, update_id, text, decision_date, owner, status, created_at)
+            VALUES (?, ?, ?, ?, NULL, 'active', ?)
+            """,
+            (project_id, update_id, decision, decision_date, timestamp),
+        )
+
+
 def create_update(connection: sqlite3.Connection, payload: dict) -> dict:
     project_id = int(payload.get("projectId") or payload.get("project_id") or 0)
     require_project(connection, project_id)
@@ -1274,8 +2146,14 @@ def create_update(connection: sqlite3.Connection, payload: dict) -> dict:
             },
         )
 
-    update = connection.execute("SELECT * FROM updates WHERE id = ?", (cursor.lastrowid,)).fetchone()
-    return {"update": row_to_update(update), "createdAction": created_action}
+    update_id = cursor.lastrowid
+
+    update = connection.execute("SELECT * FROM updates WHERE id = ?", (update_id,)).fetchone()
+    return {
+        "update": row_to_update(update),
+        "createdAction": created_action,
+        "decisions": list_decisions(connection, project_id),
+    }
 
 
 def update_project_note(connection: sqlite3.Connection, update_id: int, payload: dict) -> dict:
@@ -1301,7 +2179,7 @@ def update_project_note(connection: sqlite3.Connection, update_id: int, payload:
         (text, meeting_date, update_id),
     )
     updated = connection.execute("SELECT * FROM updates WHERE id = ?", (update_id,)).fetchone()
-    return row_to_update(updated)
+    return {"update": row_to_update(updated), "decisions": list_decisions(connection, existing["project_id"])}
 
 
 def delete_project_note(connection: sqlite3.Connection, update_id: int) -> dict:
@@ -1311,7 +2189,7 @@ def delete_project_note(connection: sqlite3.Connection, update_id: int) -> dict:
 
     deleted_update = row_to_update(existing)
     connection.execute("DELETE FROM updates WHERE id = ?", (update_id,))
-    return {"deletedUpdate": deleted_update}
+    return {"deletedUpdate": deleted_update, "decisions": list_decisions(connection, existing["project_id"])}
 
 
 def normalize_bug_status(value: str) -> str:
@@ -1905,13 +2783,26 @@ def bugdb_query_value(value: object) -> object:
     return values[0] if len(values) == 1 else values
 
 
+def bugdb_like_query_value(value: object) -> object:
+    raw_value = normalize_name(value)
+    if not raw_value:
+        return None
+    if "%" in raw_value or "_" in raw_value:
+        return {"$like": raw_value}
+    return {"$like": f"%{raw_value}%"}
+
+
 def bugdb_generic_query_payload(query_input: object) -> dict:
     if not isinstance(query_input, dict):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Bug query requires a JSON object.")
 
     query = {}
     for input_key, bugdb_key in BUGDB_QUERY_FIELDS.items():
-        value = bugdb_query_value(query_input.get(input_key))
+        value = (
+            bugdb_like_query_value(query_input.get(input_key))
+            if input_key in BUGDB_LIKE_QUERY_FIELDS
+            else bugdb_query_value(query_input.get(input_key))
+        )
         if value is not None:
             query[bugdb_key] = value
 
@@ -1941,9 +2832,9 @@ def refresh_project_bugs(connection: sqlite3.Connection, project_id: int, payloa
 
     refreshed_at = now_iso()
     bugs = [normalize_bug_record(record, project_id, index) for index, record in enumerate(records)]
-    connection.execute("DELETE FROM bugs WHERE project_id = ?", (project_id,))
-    save_project_bugs(connection, project_id, bugs, refreshed_at)
-    return list_bugs(connection, project_id)
+    for bug in bugs:
+        bug["refreshedAt"] = refreshed_at
+    return bugs
 
 
 def save_project_bugs(connection: sqlite3.Connection, project_id: int, bugs: list[dict], refreshed_at: str) -> None:
@@ -2000,15 +2891,16 @@ def upload_and_refresh_project_bugs(connection: sqlite3.Connection, project_id: 
     records = parse_uploaded_bug_file(payload)
     if not records:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Uploaded bug file did not contain usable bug rows.")
+    refreshed_at = now_iso()
     bugs = [normalize_bug_record(record, project_id, index) for index, record in enumerate(records)]
-    save_project_bugs(connection, project_id, bugs, now_iso())
-    return list_bugs(connection, project_id)
+    for bug in bugs:
+        bug["refreshedAt"] = refreshed_at
+    return bugs
 
 
 def clear_project_bugs(connection: sqlite3.Connection, project_id: int) -> dict:
     require_project(connection, project_id)
-    cursor = connection.execute("DELETE FROM bugs WHERE project_id = ?", (project_id,))
-    return {"deletedBugs": cursor.rowcount}
+    return {"deletedBugs": 0}
 
 
 def normalized_bug_query_payload(payload: dict) -> tuple[str, dict]:
@@ -2321,13 +3213,22 @@ def dedupe_summary_items(items: list[str]) -> list[str]:
 
 
 def formatted_action_summary(action: dict, status_label: str | None = None) -> str:
-    title = normalize_name(action.get("title"))
+    title = compact_summary_text(action.get("title"), 120).rstrip(".")
     if not title:
         return ""
-    owner = normalize_name(action.get("owner")) or "No owner"
+    owner = normalize_name(action.get("owner"))
     status = status_label or normalize_name(action.get("status")) or "active"
-    due = f", due {summary_date_label(action.get('completionDate'))}" if action.get("completionDate") else ""
-    return f"{title} ({owner}, {status}{due})."
+    due_date = summary_date_label(action.get("completionDate")) if action.get("completionDate") else ""
+    owner_prefix = f"{owner} owns " if owner else ""
+    if status == "done":
+        return f"{title} is complete."
+    if status == "blocked":
+        return f"{title} is blocked."
+    if status == "overdue":
+        return f"{owner_prefix}{title} and it is overdue."
+    if due_date:
+        return f"{owner_prefix}{title} by {due_date}."
+    return f"{owner_prefix}{title}."
 
 
 def action_dedupe_key(title: object, owner: object) -> str:
@@ -2376,7 +3277,66 @@ def blocked_from_notes(updates: list[dict]) -> list[str]:
     return dedupe_summary_items(blocked)
 
 
-def local_project_summary(project: dict, updates: list[dict], actions: list[dict]) -> dict:
+def customer_asks_from_notes(updates: list[dict]) -> list[str]:
+    ask_pattern = re.compile(
+        r"\b(customer|client|stakeholder|pm|approval|approve|input|confirm|confirmation|provide|required|ask|need from)\b",
+        flags=re.IGNORECASE,
+    )
+    asks = []
+    for update in reversed(updates):
+        text = compact_summary_text(update.get("text"))
+        if text and ask_pattern.search(text):
+            asks.append(text)
+    return dedupe_summary_items(asks)
+
+
+def next_steps_from_actions(actions: list[dict]) -> list[str]:
+    next_steps = []
+    for action in actions:
+        if action.get("status") in {"done", "blocked"}:
+            continue
+        item = formatted_action_summary(action, "next")
+        if item:
+            next_steps.append(item)
+    return dedupe_summary_items(next_steps)
+
+
+def executive_status(active_actions: list[dict], blocked_actions: list[dict]) -> tuple[str, str]:
+    today = date.today()
+    overdue_count = 0
+    for action in active_actions:
+        due_date = action.get("completionDate")
+        try:
+            if due_date and date.fromisoformat(str(due_date)) < today:
+                overdue_count += 1
+        except ValueError:
+            continue
+    if blocked_actions or overdue_count >= 3:
+        return "Red", f"{len(blocked_actions)} blocked and {overdue_count} overdue actions need attention."
+    if overdue_count or len(active_actions) >= 5:
+        return "Yellow", f"{len(active_actions)} active and {overdue_count} overdue actions require follow-up."
+    return "Green", "No major blockers or overdue action load is currently captured."
+
+
+def bug_risks(bugs: list[dict]) -> list[str]:
+    risks = []
+    for bug in bugs[:8]:
+        severity = normalize_name(bug.get("severity"))
+        status = normalize_name(bug.get("status"))
+        title = compact_summary_text(bug.get("title"), 120)
+        if title and (severity in {"1", "2", "high", "critical"} or status):
+            risk_detail = []
+            if severity:
+                risk_detail.append(f"severity {severity}")
+            if status:
+                risk_detail.append(f"status {status}")
+            suffix = f" has {' and '.join(risk_detail)}" if risk_detail else " needs attention"
+            risks.append(f"Bug {bug.get('id')} {suffix}.")
+    return dedupe_summary_items(risks)
+
+
+def local_project_summary(project: dict, updates: list[dict], actions: list[dict], bugs: list[dict] | None = None) -> dict:
+    bugs = bugs or []
     project_name = normalize_name(project.get("name")) or "Project"
     recent_updates = list(reversed(updates))[:5]
     active_actions = [action for action in actions if action.get("status") == "active"]
@@ -2410,22 +3370,150 @@ def local_project_summary(project: dict, updates: list[dict], actions: list[dict
         if formatted_action_summary(action, "done")
     ] + completed_from_notes(updates))
     decisions = note_decisions(updates)
+    risks = dedupe_summary_items(blocked + bug_risks(bugs))
+    next_steps = next_steps_from_actions(actions)
+    customer_asks = customer_asks_from_notes(updates)
+    status, status_reason = executive_status(active_actions, blocked_actions)
 
     overview = (
         f"{project_name} has {plural_label(len(updates), 'saved meeting note')} and "
         f"{plural_label(len(actions), 'action item')}: "
         f"{len(active_actions)} pending, {len(blocked_actions)} blocked, and {len(done_actions)} done."
     )
+    if bugs:
+        overview = f"{overview} Bug DB has {plural_label(len(bugs), 'bug')} loaded for this project."
     if recent_updates:
         overview = f"{overview} Latest activity: {compact_summary_text(recent_updates[0].get('text'), 120)}"
 
     return {
-        "headline": f"{project_name} summary",
+        "headline": f"{project_name} executive status",
+        "status": status,
+        "statusReason": status_reason,
+        "reportDate": date.today().isoformat(),
         "overview": overview,
         "pending": pending[:5] or ["No pending action items were found."],
         "blocked": blocked[:5] or ["No blocked work is captured."],
         "done": done[:5] or ["No action items are marked done."],
         "keyDecisions": decisions[:5] or ["No key decisions captured yet."],
+        "risks": risks[:5] or ["No delivery risks are currently captured."],
+        "nextSteps": next_steps[:5] or ["No next steps are currently captured."],
+        "customerAsks": customer_asks[:5] or ["No customer asks are currently captured."],
+    }
+
+
+def project_memory_items(updates: list[dict], actions: list[dict], decisions: list[dict], phases: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for update in updates:
+        items.append({
+            "label": "Meeting note" if update.get("meetingDate") else "Project note",
+            "date": update.get("meetingDate") or update.get("createdAt"),
+            "text": compact_summary_text(update.get("text"), 600),
+            "type": "note",
+        })
+    for decision in decisions:
+        items.append({
+            "label": "Decision",
+            "date": decision.get("decisionDate") or decision.get("createdAt"),
+            "text": compact_summary_text(decision.get("text"), 500),
+            "type": "decision",
+        })
+    for action in actions:
+        details = [normalize_name(action.get("status")), normalize_name(action.get("owner"))]
+        if action.get("completionDate"):
+            details.append(f"due {action.get('completionDate')}")
+        suffix = f" ({', '.join(detail for detail in details if detail)})" if any(details) else ""
+        items.append({
+            "label": "Action",
+            "date": action.get("meetingDate") or action.get("createdAt"),
+            "text": compact_summary_text(f"{action.get('title')}{suffix}", 500),
+            "type": "action",
+        })
+    for phase in phases:
+        item_titles = [
+            f"{item.get('title')} [{'done' if item.get('completed') else 'open'}]"
+            for item in phase.get("items", [])
+        ]
+        items.append({
+            "label": "Milestone",
+            "date": phase.get("createdAt"),
+            "text": compact_summary_text(
+                f"{phase.get('name')}: {phase.get('milestone')} ({phase.get('progress')}% complete). "
+                f"Items: {'; '.join(item_titles)}",
+                700,
+            ),
+            "type": "milestone",
+        })
+    return [item for item in items if item.get("text")]
+
+
+def normalize_question_terms(question: str) -> list[str]:
+    stop_words = {
+        "about", "after", "again", "all", "and", "are", "did", "does", "for", "from", "have",
+        "how", "is", "last", "me", "of", "on", "our", "pending", "project", "should", "still",
+        "the", "this", "to", "update", "was", "what", "when", "where", "which", "who", "why",
+    }
+    return [
+        term
+        for term in re.sub(r"[^a-z0-9 ]+", " ", question.lower()).split()
+        if len(term) > 2 and term not in stop_words
+    ]
+
+
+def local_memory_answer(question: str, memory_items: list[dict]) -> dict:
+    terms = normalize_question_terms(question)
+    scored_items = []
+    for item in memory_items:
+        text = str(item.get("text") or "")
+        normalized = text.lower()
+        score = sum(1 for term in terms if term in normalized)
+        if score:
+            scored_items.append((score, item))
+    selected_items = [item for _, item in sorted(scored_items, key=lambda pair: pair[0], reverse=True)[:5]]
+    if not selected_items:
+        selected_items = memory_items[:5]
+    if not selected_items:
+        return {
+            "answer": "No project memory is available yet. Add meeting notes, decisions, actions, or milestones first.",
+            "sources": [],
+        }
+
+    snippets = [item["text"] for item in selected_items[:3]]
+    return {
+        "answer": "Based on current project memory: " + " ".join(snippets),
+        "sources": [
+            {
+                "label": item.get("label") or "Project memory",
+                "date": item.get("date"),
+                "text": compact_summary_text(item.get("text"), 220),
+            }
+            for item in selected_items
+        ],
+    }
+
+
+def normalize_memory_answer_payload(payload: object, fallback: dict) -> dict:
+    try:
+        normalized = normalize_ai_payload(payload)
+    except ApiError:
+        return fallback
+    answer = compact_summary_text(normalized.get("answer"), 1200)
+    raw_sources = normalized.get("sources")
+    sources = []
+    if isinstance(raw_sources, list):
+        for source in raw_sources[:6]:
+            if not isinstance(source, dict):
+                continue
+            text = compact_summary_text(source.get("text"), 220)
+            if not text:
+                continue
+            sources.append({
+                "label": normalize_name(source.get("label")) or "Project memory",
+                "date": normalize_name(source.get("date")) or None,
+                "text": text,
+            })
+    return {
+        "answer": answer or fallback["answer"],
+        "sources": sources or fallback["sources"],
     }
 
 
@@ -2457,8 +3545,25 @@ def normalize_summary_payload(payload: object, fallback: dict | None = None) -> 
                 return [normalize_name(item) for item in value if normalize_name(item)]
         return []
 
+    def status_value(value: object) -> str:
+        text = normalize_name(value).lower()
+        if text in {"green", "yellow", "red"}:
+            return text.capitalize()
+        return ""
+
+    def report_date_value(value: object) -> str:
+        try:
+            return normalize_date(value or date.today().isoformat(), "reportDate") or date.today().isoformat()
+        except ApiError:
+            return fallback["reportDate"] if fallback else date.today().isoformat()
+
     summary = {
-        "headline": normalize_name(normalized.get("headline")) or "Project summary",
+        "headline": normalize_name(normalized.get("headline")) or "Executive status report",
+        "status": status_value(normalized.get("status")) or "Yellow",
+        "statusReason": normalize_name(
+            normalized.get("statusReason") or normalized.get("status_reason")
+        ) or "Status reason was not returned.",
+        "reportDate": report_date_value(normalized.get("reportDate") or normalized.get("report_date")),
         "overview": normalize_name(normalized.get("overview")) or "No summary returned.",
         "pending": dedupe_summary_items(
             string_list("pending", "pendingItems", "pending_items", "nextSteps", "next_steps")
@@ -2468,16 +3573,275 @@ def normalize_summary_payload(payload: object, fallback: dict | None = None) -> 
         "keyDecisions": dedupe_summary_items(
             string_list("keyDecisions", "key_decisions", "decisions")
         ),
+        "risks": dedupe_summary_items(string_list("risks", "riskItems", "risk_items")),
+        "nextSteps": dedupe_summary_items(string_list("nextSteps", "next_steps", "recommendedNextSteps")),
+        "customerAsks": dedupe_summary_items(string_list("customerAsks", "customer_asks", "stakeholderAsks")),
     }
     if fallback:
-        if summary["headline"] == "Project summary":
+        if summary["headline"] == "Executive status report":
             summary["headline"] = fallback["headline"]
+        if summary["status"] not in {"Green", "Yellow", "Red"}:
+            summary["status"] = fallback["status"]
+        if summary["statusReason"] == "Status reason was not returned.":
+            summary["statusReason"] = fallback["statusReason"]
         if summary_overview_is_sparse(summary["overview"]):
             summary["overview"] = fallback["overview"]
-        for key in ("pending", "blocked", "done", "keyDecisions"):
+        for key in ("pending", "blocked", "done", "keyDecisions", "risks", "nextSteps", "customerAsks"):
             if not summary[key]:
                 summary[key] = fallback[key]
     return summary
+
+
+FOLLOWUP_FLAGS = {
+    "repeated_blocker",
+    "repeated_customer_ask",
+    "decision_pending",
+}
+
+
+def followup_topic_key(value: object) -> str:
+    text = normalized_match_text(value)
+    text = re.sub(
+        r"\b(pending|follow|followed|following|still|again|blocked|next|open|waiting|needed|need|needs)\b",
+        "",
+        text,
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fallback_followups(projects: list[dict], updates: list[dict], actions: list[dict], decisions: list[dict]) -> list[dict]:
+    active_project_ids = {project["id"] for project in projects if not project.get("archivedAt")}
+    decision_texts_by_project: dict[int, list[str]] = {}
+    for decision in decisions:
+        project_id = decision.get("projectId")
+        if project_id in active_project_ids:
+            decision_texts_by_project.setdefault(project_id, []).append(normalized_match_text(decision.get("text")))
+
+    followups: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+
+    def add_followup(
+        project_id: int,
+        topic: object,
+        signal: object,
+        flags: list[str],
+        suggested_action: object,
+        action_id: int | None = None,
+    ) -> None:
+        clean_topic = compact_summary_text(topic, 120)
+        if not clean_topic or project_id not in active_project_ids:
+            return
+        key = (project_id, normalized_match_text(clean_topic))
+        if key in seen:
+            return
+        seen.add(key)
+        followups.append({
+            "projectId": project_id,
+            "topic": clean_topic,
+            "signal": compact_summary_text(signal, 160) or "Needs follow-up.",
+            "flags": [flag for flag in flags if flag in FOLLOWUP_FLAGS],
+            "suggestedAction": compact_summary_text(suggested_action, 140) or f"Follow up on {clean_topic}",
+            "actionId": action_id,
+        })
+
+    topics: dict[tuple[int, str], dict] = {}
+    for update in updates:
+        project_id = update.get("projectId")
+        if project_id not in active_project_ids:
+            continue
+        lines = [line.strip(" -\t") for line in re.split(r"[\n.]+", str(update.get("text") or "")) if line.strip()]
+        for line in lines:
+            if not re.search(
+                r"\b(pending|follow|still|again|blocked|next|open|waiting|decision|approve|confirm|customer|ask)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                continue
+            topic_key = followup_topic_key(line)
+            if len(topic_key) < 8:
+                continue
+            topic = topics.setdefault(
+                (project_id, topic_key),
+                {"projectId": project_id, "topic": line, "count": 0, "customer": False, "decision": False},
+            )
+            topic["count"] += 1
+            topic["customer"] = topic["customer"] or bool(
+                re.search(r"\b(customer|stakeholder|ask|approval|approve|confirm)\b", line, re.IGNORECASE)
+            )
+            topic["decision"] = topic["decision"] or bool(
+                re.search(r"\b(decision|approve|approval|confirm)\b", line, re.IGNORECASE)
+            )
+
+    for topic in topics.values():
+        project_id = topic["projectId"]
+        flags: list[str] = []
+        if topic["count"] > 1:
+            if "blocked" in normalized_match_text(topic["topic"]):
+                flags.append("repeated_blocker")
+            elif topic["customer"]:
+                flags.append("repeated_customer_ask")
+            elif topic["decision"]:
+                flags.append("decision_pending")
+        if topic["customer"]:
+            flags.append("repeated_customer_ask")
+        if topic["decision"] and not decision_texts_by_project.get(project_id):
+            flags.append("decision_pending")
+        if topic["count"] > 1 or flags:
+            add_followup(
+                project_id,
+                topic["topic"],
+                f"Appeared in {topic['count']} meeting note reference{'s' if topic['count'] != 1 else ''}.",
+                flags,
+                f"Clarify owner, next step, and due date for {topic['topic']}",
+            )
+
+    return followups[:10]
+
+
+def normalize_followup_payload(payload: object, fallback: list[dict], project_ids: set[int]) -> list[dict]:
+    normalized = normalize_ai_payload(payload)
+    raw_items = (
+        normalized.get("followUps")
+        or normalized.get("followups")
+        or normalized.get("follow_ups")
+        or normalized.get("items")
+        or []
+    )
+    if not isinstance(raw_items, list):
+        return fallback
+
+    followups: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            project_id = int(item.get("projectId") or item.get("project_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if project_id not in project_ids:
+            continue
+        topic = normalize_name(item.get("topic"))
+        if not topic:
+            continue
+        key = (project_id, normalized_match_text(topic))
+        if key in seen:
+            continue
+        seen.add(key)
+        flags_value = item.get("flags")
+        flags = [
+            normalize_name(flag)
+            for flag in flags_value
+            if normalize_name(flag) in FOLLOWUP_FLAGS
+        ] if isinstance(flags_value, list) else []
+        suggested_action = normalize_name(item.get("suggestedAction") or item.get("suggested_action"))
+        try:
+            action_id = int(item.get("actionId") or item.get("action_id")) if (item.get("actionId") or item.get("action_id")) else None
+        except (TypeError, ValueError):
+            action_id = None
+        followups.append({
+            "projectId": project_id,
+            "topic": compact_summary_text(topic, 120),
+            "signal": compact_summary_text(item.get("signal"), 160) or "AI detected this as unresolved.",
+            "flags": flags,
+            "suggestedAction": compact_summary_text(suggested_action, 140) or f"Follow up on {topic}",
+            "actionId": action_id,
+        })
+
+    return followups[:10] or fallback
+
+
+def detect_followups_with_ai(projects: list[dict], updates: list[dict], actions: list[dict], decisions: list[dict]) -> list[dict]:
+    active_projects = [project for project in projects if not project.get("archivedAt")]
+    project_ids = {project["id"] for project in active_projects}
+    fallback = fallback_followups(active_projects, updates, actions, decisions)
+    if not active_projects:
+        return []
+
+    system_prompt = (
+        "You detect unresolved project follow-ups from meeting notes, decisions, and actions. "
+        "Return only one JSON object with key followUps. "
+        "Each follow-up must have projectId, topic, signal, flags, and suggestedAction. "
+        "Do not create follow-ups for ordinary action hygiene such as blocked actions, missing owners, missing due dates, or overdue actions. "
+        "Those are already tracked in the action board. "
+        "Use only these flags when applicable: repeated_blocker, repeated_customer_ask, decision_pending. "
+        "Find repeated unresolved topics, repeated blockers from notes, customer asks, and pending decisions. "
+        "Do not flag every action. Only flag discussion topics that are repeated, customer-facing, or awaiting a decision. "
+        "Prefer concrete project language over generic statements. "
+        "Do not invent facts. Return at most 10 high-signal follow-ups."
+    )
+    user_prompt = {
+        "projects": [
+            {"id": project["id"], "name": project["name"], "members": project.get("members") or []}
+            for project in active_projects
+        ],
+        "meetingNotes": [
+            {
+                "projectId": update.get("projectId"),
+                "meetingDate": update.get("meetingDate"),
+                "text": update.get("text"),
+            }
+            for update in updates
+            if update.get("projectId") in project_ids
+        ][-50:],
+        "actions": [
+            {
+                "projectId": action.get("projectId"),
+                "id": action.get("id"),
+                "title": action.get("title"),
+                "owner": action.get("owner"),
+                "status": action.get("status"),
+                "completionDate": action.get("completionDate"),
+            }
+            for action in actions
+            if action.get("projectId") in project_ids and action.get("status") != "done"
+        ],
+        "decisions": [
+            {
+                "projectId": decision.get("projectId"),
+                "decisionDate": decision.get("decisionDate"),
+                "text": decision.get("text"),
+                "owner": decision.get("owner"),
+                "status": decision.get("status"),
+            }
+            for decision in decisions
+            if decision.get("projectId") in project_ids
+        ],
+    }
+
+    try:
+        settings = configured_ai_settings()
+        model = oci_chat_model(**settings)
+        messages = [("system", system_prompt), ("human", json.dumps(user_prompt))]
+        try:
+            structured_model = model.with_structured_output(AI_FOLLOWUP_SCHEMA, method="json_mode")
+            return normalize_followup_payload(structured_model.invoke(messages), fallback, project_ids)
+        except Exception:
+            response = model.invoke(messages)
+            return normalize_followup_payload(
+                parse_ai_json(response_content_text(getattr(response, "content", response))),
+                fallback,
+                project_ids,
+            )
+    except Exception:
+        return fallback
+
+
+def project_followups(connection: sqlite3.Connection) -> dict:
+    projects = list_projects(connection)
+    followups = detect_followups_with_ai(
+        projects,
+        list_updates(connection),
+        list_actions(connection),
+        list_decisions(connection),
+    )
+    project_names = {project["id"]: project["name"] for project in projects}
+    return {
+        "followUps": [
+            {**followup, "projectName": project_names.get(followup["projectId"], "Unknown project")}
+            for followup in followups
+        ]
+    }
 
 
 def extract_actions_with_ai(notes: str, project: dict) -> dict:
@@ -2585,21 +3949,30 @@ def extract_actions_with_ai(notes: str, project: dict) -> dict:
     return parse_ai_json(response_content_text(getattr(response, "content", response)))
 
 
-def summarize_project_with_ai(project: dict, updates: list[dict], actions: list[dict]) -> dict:
+def summarize_project_with_ai(project: dict, updates: list[dict], actions: list[dict], bugs: list[dict] | None = None) -> dict:
+    bugs = bugs or []
     settings = configured_ai_settings()
-    fallback_summary = local_project_summary(project, updates, actions)
+    fallback_summary = local_project_summary(project, updates, actions, bugs)
     system_prompt = (
-        "You summarize project status from saved meeting notes and action items. "
-        "Return only one JSON object with keys headline, overview, pending, blocked, done, and keyDecisions. "
+        "You create an executive, customer-ready project status report from saved meeting notes and action items. "
+        "Return only one JSON object with keys headline, status, statusReason, reportDate, overview, "
+        "pending, blocked, done, keyDecisions, risks, nextSteps, and customerAsks. "
         "Do not include markdown, code fences, explanations, or any text outside the JSON object. "
         "The first character must be { and the last character must be }. "
         "Do not summarize notes date by date. "
-        "Keep overview to one useful paragraph about overall project status. "
-        "pending, blocked, done, and keyDecisions must each be short arrays of strings with at least one item. "
+        "Use status Green, Yellow, or Red. "
+        "Use statusReason to explain the status with specific project signals. "
+        "Keep overview to one customer-ready paragraph about overall project status. "
+        "All array fields must be short arrays of strings with at least one item. "
+        "Each array item must be one short sentence, ideally under 14 words. "
+        "Avoid parenthetical metadata-heavy lines. "
         "pending is open active or overdue work that is not blocked and not done. "
         "blocked is blocked work, risks, blockers, dependencies, or issues preventing progress. "
         "done is completed work and action items explicitly marked done. "
         "keyDecisions is decisions, approvals, agreements, or choices captured in notes. "
+        "risks is delivery risks, dependencies, or issues that could affect scope, date, quality, or customer confidence. "
+        "nextSteps is concrete recommended next steps for the next update cycle. "
+        "customerAsks is approvals, inputs, decisions, or actions needed from the customer or stakeholders. "
         "Mention concrete saved note details, action titles, owners, due dates, or blocked items when present. "
         "Never return vague phrases such as 'the team discussed progress' without specifics. "
         "Use only the provided project notes and action items; do not invent facts."
@@ -2627,13 +4000,29 @@ def summarize_project_with_ai(project: dict, updates: list[dict], actions: list[
             }
             for action in actions
         ],
+        "bugs": [
+            {
+                "assignee": bug.get("assignee"),
+                "id": bug.get("id"),
+                "severity": bug.get("severity"),
+                "status": bug.get("status"),
+                "title": bug.get("title"),
+            }
+            for bug in bugs[:100]
+        ],
         "schema": {
             "headline": "string",
+            "status": "Green | Yellow | Red",
+            "statusReason": "string",
+            "reportDate": date.today().isoformat(),
             "overview": "string",
             "pending": ["string"],
             "blocked": ["string"],
             "done": ["string"],
             "keyDecisions": ["string"],
+            "risks": ["string"],
+            "nextSteps": ["string"],
+            "customerAsks": ["string"],
         },
     }
 
@@ -2662,6 +4051,87 @@ def summarize_project_with_ai(project: dict, updates: list[dict], actions: list[
         parse_ai_json(response_content_text(getattr(response, "content", response))),
         fallback_summary,
     )
+
+
+def answer_project_memory_question_with_ai(
+    project: dict,
+    question: str,
+    memory_items: list[dict],
+) -> dict:
+    fallback_answer = local_memory_answer(question, memory_items)
+    if not memory_items:
+        return fallback_answer
+
+    settings = configured_ai_settings()
+    system_prompt = (
+        "You are Project Pulse's project memory assistant. "
+        "Answer the user's question using only the provided project memory items. "
+        "Return exactly one JSON object with keys answer and sources. "
+        "Do not include markdown, code fences, or text outside the JSON object. "
+        "If the memory does not contain enough information, say what is missing. "
+        "Keep answer concise and practical for a project manager. "
+        "Sources must cite the memory item label, date when available, and a short source text."
+    )
+    user_prompt = {
+        "project": {
+            "name": project.get("name"),
+            "classification": project.get("classification"),
+            "members": project.get("members") or [],
+        },
+        "question": question,
+        "memoryItems": memory_items[:80],
+        "schema": {
+            "answer": "string",
+            "sources": [{"label": "string", "date": "YYYY-MM-DD|null", "text": "string"}],
+        },
+    }
+
+    model = oci_chat_model(**settings)
+    messages = [
+        ("system", system_prompt),
+        ("human", json.dumps(user_prompt)),
+    ]
+
+    try:
+        structured_model = model.with_structured_output(AI_PROJECT_MEMORY_QA_SCHEMA, method="json_mode")
+        return normalize_memory_answer_payload(structured_model.invoke(messages), fallback_answer)
+    except ApiError:
+        raise
+    except Exception:
+        pass
+
+    try:
+        response = model.invoke(messages)
+    except ApiError:
+        raise
+    except Exception:
+        return fallback_answer
+
+    return normalize_memory_answer_payload(
+        parse_ai_json(response_content_text(getattr(response, "content", response))),
+        fallback_answer,
+    )
+
+
+def answer_project_memory_question(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
+    project = row_to_project(connection, require_project(connection, project_id))
+    question = normalize_name(payload.get("question"))
+    if not question:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Question is required.")
+
+    memory_items = project_memory_items(
+        list_updates(connection, project_id),
+        list_actions(connection, project_id),
+        list_decisions(connection, project_id),
+        list_phases(connection, project_id),
+    )
+    try:
+        answer = answer_project_memory_question_with_ai(project, question, memory_items)
+    except ApiError as error:
+        if error.status != HTTPStatus.BAD_GATEWAY:
+            raise
+        answer = local_memory_answer(question, memory_items)
+    return {"answer": answer}
 
 
 def action_payloads_from_ai(
@@ -2755,14 +4225,19 @@ def create_actions_bulk(connection: sqlite3.Connection, payload: dict) -> dict:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Actions must be an array.")
 
     created_actions = []
+    skipped_duplicates = 0
     for action in raw_actions:
         if not isinstance(action, dict):
             continue
-        created_actions.append(create_action(connection, action))
+        created_action = create_action(connection, action)
+        if created_action.get("duplicate"):
+            skipped_duplicates += 1
+            continue
+        created_actions.append(created_action)
 
-    if not created_actions:
+    if not created_actions and not skipped_duplicates:
         raise ApiError(HTTPStatus.BAD_REQUEST, "At least one valid action is required.")
-    return {"actions": created_actions}
+    return {"actions": created_actions, "skippedDuplicates": skipped_duplicates}
 
 
 def delete_actions_bulk(connection: sqlite3.Connection, payload: dict) -> dict:
@@ -2827,6 +4302,11 @@ def extract_project_actions(connection: sqlite3.Connection, project_id: int, pay
     if not notes:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Meeting notes are required for AI extraction.")
 
+    memory_suggestions = memory_suggestions_from_notes(notes)
+
+    def with_memory_suggestions(extracted_payload: dict) -> dict:
+        return {**extracted_payload, "memorySuggestions": memory_suggestions}
+
     try:
         ai_payload = extract_actions_with_ai(notes, project)
     except ApiError as error:
@@ -2848,7 +4328,7 @@ def extract_project_actions(connection: sqlite3.Connection, project_id: int, pay
             meeting_date,
         )
         if extracted["actions"] or extracted.get("skippedDuplicates"):
-            return extracted
+            return with_memory_suggestions(extracted)
 
     extracted = action_handler(connection, project_id, source, ai_payload, notes, project["members"], meeting_date)
     if not extracted["actions"] and fallback_payload["actions"]:
@@ -2890,18 +4370,24 @@ def extract_project_actions(connection: sqlite3.Connection, project_id: int, pay
             meeting_date,
         )
     if not extracted["actions"] and extracted.get("skippedDuplicates"):
-        return extracted
+        return with_memory_suggestions(extracted)
     if not extracted["actions"]:
+        if memory_suggestions["decisions"] or memory_suggestions["blockers"]:
+            return with_memory_suggestions({**extracted, "actions": []})
         raise ApiError(HTTPStatus.BAD_GATEWAY, "AI did not return any usable action items.")
-    return extracted
+    return with_memory_suggestions(extracted)
 
 
-def summarize_project_discussions(connection: sqlite3.Connection, project_id: int) -> dict:
+def summarize_project_discussions(connection: sqlite3.Connection, project_id: int, payload: dict | None = None) -> dict:
     project = row_to_project(connection, require_project(connection, project_id))
+    payload = payload if isinstance(payload, dict) else {}
     updates = list_updates(connection, project_id)
-    if not updates:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "No project notes are available to summarize.")
-    return {"summary": summarize_project_with_ai(project, updates, list_actions(connection, project_id))}
+    actions = list_actions(connection, project_id)
+    raw_bugs = payload.get("bugs")
+    bugs = raw_bugs if isinstance(raw_bugs, list) else list_bugs(connection, project_id)
+    if not updates and not actions and not bugs:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "No project data is available to summarize.")
+    return {"summary": summarize_project_with_ai(project, updates, actions, bugs)}
 
 
 def dashboard_payload(connection: sqlite3.Connection, project_id: int) -> dict:
@@ -2917,6 +4403,7 @@ def dashboard_payload(connection: sqlite3.Connection, project_id: int) -> dict:
         "metrics": metrics,
         "actions": actions,
         "updates": list_updates(connection, project_id),
+        "decisions": list_decisions(connection, project_id),
         "bugs": list_bugs(connection, project_id),
         "bugQueries": list_bug_queries(connection, project_id),
     }
@@ -2969,15 +4456,27 @@ class ProjectPulseHandler(BaseHTTPRequestHandler):
                     "projects": list_projects(connection),
                     "actions": list_actions(connection),
                     "updates": list_updates(connection),
+                    "decisions": list_decisions(connection),
                     "bugs": list_bugs(connection),
                     "bugQueries": list_bug_queries(connection),
+                    "phases": list_phases(connection),
+                    "projectLinks": list_project_links(connection),
                 }
+
+            if method == "GET" and parts == ["followups"]:
+                return project_followups(connection)
 
             if method == "GET" and parts == ["projects"]:
                 return {"projects": list_projects(connection)}
 
             if method == "POST" and parts == ["projects"]:
                 return {"project": create_project(connection, self.read_json()), "_status": HTTPStatus.CREATED}
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "archive" and method == "POST":
+                return archive_project(connection, int(parts[1]), True)
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "restore" and method == "POST":
+                return archive_project(connection, int(parts[1]), False)
 
             if len(parts) == 2 and parts[0] == "projects" and parts[1].isdigit() and method == "DELETE":
                 return {**delete_project(connection, int(parts[1])), "_status": HTTPStatus.OK}
@@ -2990,6 +4489,51 @@ class ProjectPulseHandler(BaseHTTPRequestHandler):
 
             if len(parts) == 3 and parts[0] == "projects" and parts[2] == "members" and method == "PATCH":
                 return {"project": replace_project_members(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "details" and method == "PATCH":
+                return {"project": update_project_details(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "phases" and method == "GET":
+                return {"phases": list_phases(connection, int(parts[1]))}
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "phases" and method == "POST":
+                return {"phase": create_phase(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
+
+            if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["phases", "reorder"] and method == "POST":
+                return {"phases": reorder_phases(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "links" and method == "POST":
+                return {"projectLink": create_project_link(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
+
+            if len(parts) == 2 and parts[0] == "phases" and method == "PATCH":
+                return {"phase": update_phase(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 3 and parts[0] == "phases" and parts[2] in {"up", "down"} and method == "POST":
+                return {"phase": move_phase(connection, int(parts[1]), parts[2])}
+
+            if len(parts) == 2 and parts[0] == "phases" and method == "DELETE":
+                return delete_phase(connection, int(parts[1]))
+
+            if len(parts) == 3 and parts[0] == "phases" and parts[2] == "items" and method == "POST":
+                return {"phaseItem": create_phase_item(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
+
+            if len(parts) == 4 and parts[0] == "phases" and parts[2:] == ["items", "reorder"] and method == "POST":
+                return {"phaseItems": reorder_phase_items(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 2 and parts[0] == "phase-items" and method == "PATCH":
+                return {"phaseItem": update_phase_item(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 3 and parts[0] == "phase-items" and parts[2] in {"up", "down"} and method == "POST":
+                return {"phaseItem": move_phase_item(connection, int(parts[1]), parts[2])}
+
+            if len(parts) == 2 and parts[0] == "phase-items" and method == "DELETE":
+                return delete_phase_item(connection, int(parts[1]))
+
+            if len(parts) == 2 and parts[0] == "project-links" and method == "PATCH":
+                return {"projectLink": update_project_link(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 2 and parts[0] == "project-links" and method == "DELETE":
+                return delete_project_link(connection, int(parts[1]))
 
             if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["bugs", "refresh"] and method == "POST":
                 return {"bugs": refresh_project_bugs(connection, int(parts[1]), self.read_json())}
@@ -3010,7 +4554,10 @@ class ProjectPulseHandler(BaseHTTPRequestHandler):
                 return {"bugQuery": create_bug_query(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
 
             if len(parts) == 3 and parts[0] == "projects" and parts[2] == "summary" and method == "POST":
-                return summarize_project_discussions(connection, int(parts[1]))
+                return summarize_project_discussions(connection, int(parts[1]), self.read_json())
+
+            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "memory-question" and method == "POST":
+                return answer_project_memory_question(connection, int(parts[1]), self.read_json())
 
             if len(parts) == 3 and parts[0] == "projects" and parts[2] == "extract-actions" and method == "POST":
                 return extract_project_actions(connection, int(parts[1]), self.read_json())
@@ -3036,8 +4583,17 @@ class ProjectPulseHandler(BaseHTTPRequestHandler):
             if method == "POST" and parts == ["updates"]:
                 return {**create_update(connection, self.read_json()), "_status": HTTPStatus.CREATED}
 
+            if method == "POST" and parts == ["decisions"]:
+                return {"decision": create_decision(connection, self.read_json()), "_status": HTTPStatus.CREATED}
+
+            if len(parts) == 2 and parts[0] == "decisions" and method == "PATCH":
+                return {"decision": update_decision(connection, int(parts[1]), self.read_json())}
+
+            if len(parts) == 2 and parts[0] == "decisions" and method == "DELETE":
+                return delete_decision(connection, int(parts[1]))
+
             if len(parts) == 2 and parts[0] == "updates" and method == "PATCH":
-                return {"update": update_project_note(connection, int(parts[1]), self.read_json())}
+                return update_project_note(connection, int(parts[1]), self.read_json())
 
             if len(parts) == 2 and parts[0] == "updates" and method == "DELETE":
                 return delete_project_note(connection, int(parts[1]))
