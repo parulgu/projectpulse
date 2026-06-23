@@ -73,6 +73,8 @@ ACTION_TRIGGER = re.compile(
     r"\b(?:needs?\s+to|need\s+to|must|should|will|has\s+to|have\s+to)\s+(?P<title>.+)",
     flags=re.IGNORECASE,
 )
+HASHTAG_PATTERN = re.compile(r"(?<!\w)#(?P<tag>[A-Za-z0-9][A-Za-z0-9_-]{0,63})")
+TAG_LINE = re.compile(r"^\s*(?:[-*]\s*)?tags?\s*:\s*(?P<body>.+?)\s*$", flags=re.IGNORECASE)
 NON_OWNER_LABELS = {
     "action",
     "actions",
@@ -158,6 +160,10 @@ AI_EXTRACTION_SCHEMA = {
                     "completionDate": {
                         "anyOf": [{"type": "string"}, {"type": "null"}],
                         "description": "Optional action completion date as YYYY-MM-DD when explicitly stated.",
+                    },
+                    "tag": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "description": "Optional action tag from an explicit #tag in the notes, without the leading #.",
                     },
                 },
                 "required": ["title", "owner", "status"],
@@ -493,6 +499,7 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
               owner TEXT,
               status TEXT NOT NULL,
               source TEXT,
+              tag TEXT,
               completion_date TEXT,
               meeting_date TEXT,
               created_at TEXT NOT NULL
@@ -575,6 +582,7 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
         )
         ensure_column(connection, "actions", "completion_date", "TEXT")
         ensure_column(connection, "actions", "meeting_date", "TEXT")
+        ensure_column(connection, "actions", "tag", "TEXT")
         ensure_column(connection, "updates", "meeting_date", "TEXT")
         ensure_column(connection, "decisions", "owner", "TEXT")
         ensure_column(connection, "decisions", "status", "TEXT NOT NULL DEFAULT 'active'")
@@ -790,6 +798,107 @@ def normalize_name(value: object) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def normalize_project_note_text(value: object) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    if "\n" in text:
+        return text
+
+    if len(text) < 180 or " - " not in text:
+        return text
+
+    text = re.sub(
+        r"\s+(?=(?:Purpose\b|Phase\s+\d+\s+[–-]|Inputs:|Outputs:|Future Direction\b|Key Discussion Points\b|Conclusion\b))",
+        "\n\n",
+        text,
+    )
+    text = re.sub(r"\s+-\s+", "\n- ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def normalize_action_tag(value: object) -> str | None:
+    text = normalize_name(value)
+    if not text:
+        return None
+    match = HASHTAG_PATTERN.search(text)
+    if match:
+        text = match.group("tag")
+    else:
+        text = text.lstrip("#")
+    text = re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-_")
+    return text[:64] or None
+
+
+def tags_from_text(value: object) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for match in HASHTAG_PATTERN.finditer(str(value or "")):
+        tag = normalize_action_tag(match.group("tag"))
+        key = normalized_match_text(tag)
+        if tag and key not in seen:
+            tags.append(tag)
+            seen.add(key)
+    return tags
+
+
+def default_action_tag_from_notes(notes: str) -> str | None:
+    for raw_line in str(notes or "").splitlines():
+        match = TAG_LINE.match(clean_meeting_line(raw_line))
+        if not match:
+            continue
+        tags = tags_from_text(match.group("body"))
+        if tags:
+            return tags[0]
+        tag = normalize_action_tag(match.group("body"))
+        if tag:
+            return tag
+    tags = tags_from_text(notes)
+    return tags[0] if len(tags) == 1 else None
+
+
+def action_tag_for_title_from_notes(title: object, notes: str) -> str | None:
+    title_key = normalized_match_text(remove_hashtags_from_text(title))
+    if not title_key:
+        return None
+    for raw_line in str(notes or "").splitlines():
+        tags = tags_from_text(raw_line)
+        if not tags:
+            continue
+        line_key = normalized_match_text(remove_hashtags_from_text(raw_line))
+        if title_key in line_key:
+            return tags[0]
+    return None
+
+
+def action_tag_from_payload(action: dict, context: object, notes: str) -> str | None:
+    raw_tag = (
+        action.get("tag")
+        or action.get("actionTag")
+        or action.get("action_tag")
+        or action.get("tags")
+    )
+    if isinstance(raw_tag, list):
+        raw_tag = raw_tag[0] if raw_tag else None
+    tag = normalize_action_tag(raw_tag)
+    if tag:
+        return tag
+    context_tags = tags_from_text(context)
+    if context_tags:
+        return context_tags[0]
+    title_tag = action_tag_for_title_from_notes(action.get("title") or context, notes)
+    if title_tag:
+        return title_tag
+    return default_action_tag_from_notes(notes)
+
+
+def remove_hashtags_from_text(value: object) -> str:
+    return normalize_name(HASHTAG_PATTERN.sub("", str(value or "")))
+
+
 def normalize_date(value: object, field_name: str) -> str | None:
     normalized = normalize_name(value)
     if not normalized:
@@ -858,7 +967,7 @@ def infer_action_owner(raw_owner: object, title: object, notes: str, members: li
 
 
 def action_title_from_text(value: object) -> str:
-    text = normalize_name(value)
+    text = remove_hashtags_from_text(value)
     text = re.sub(
         r"\b(by|before|due)\s+(today|tonight|tomorrow(?:\s+morning)?|eod|end of day|next call|the next call|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*$",
         "",
@@ -1122,6 +1231,7 @@ def structured_actions_from_next_steps(notes: str, members: list[str]) -> list[d
                 "completionDate": completion_date_from_text(segment),
                 "owner": owner,
                 "status": "blocked" if "blocked" in normalized_match_text(segment).split() else "active",
+                "tag": action_tag_from_payload({}, segment, notes),
                 "title": title,
             })
     return dedupe_action_payloads(actions)
@@ -1160,6 +1270,7 @@ def fallback_actions_from_notes(notes: str, members: list[str]) -> dict:
                 "completionDate": completion_date_from_text(fragment),
                 "owner": owner,
                 "status": "blocked" if "blocked" in normalized_match_text(fragment).split() else "active",
+                "tag": action_tag_from_payload({}, fragment, notes),
                 "title": title,
             })
 
@@ -1215,6 +1326,7 @@ def row_to_action(row: sqlite3.Row) -> dict:
         "projectId": row["project_id"],
         "status": row["status"],
         "source": row["source"],
+        "tag": row["tag"],
         "completionDate": row["completion_date"],
         "meetingDate": row["meeting_date"],
         "createdAt": row["created_at"],
@@ -1945,6 +2057,7 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
         "Meeting date",
     )
     owner = normalize_name(payload.get("owner")) or None
+    tag = normalize_action_tag(payload.get("tag") or payload.get("actionTag") or payload.get("action_tag"))
     dedupe_key = action_dedupe_key(title, owner)
     existing_rows = connection.execute(
         "SELECT * FROM actions WHERE project_id = ? ORDER BY id",
@@ -1958,8 +2071,8 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
 
     cursor = connection.execute(
         """
-        INSERT INTO actions (project_id, title, owner, status, source, completion_date, meeting_date, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO actions (project_id, title, owner, status, source, tag, completion_date, meeting_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
@@ -1967,6 +2080,7 @@ def create_action(connection: sqlite3.Connection, payload: dict) -> dict:
             owner,
             status,
             normalize_name(payload.get("source")) or "manual",
+            tag,
             completion_date,
             meeting_date,
             now_iso(),
@@ -1985,6 +2099,11 @@ def update_action(connection: sqlite3.Connection, action_id: int, payload: dict)
 
     title = normalize_name(payload.get("title")) or existing["title"]
     owner = normalize_name(payload.get("owner")) if "owner" in payload else existing["owner"]
+    tag = (
+        normalize_action_tag(payload.get("tag") or payload.get("actionTag") or payload.get("action_tag"))
+        if "tag" in payload or "actionTag" in payload or "action_tag" in payload
+        else existing["tag"]
+    )
     status = str(payload.get("status") or existing["status"]).lower()
     if status not in ACTION_STATUSES:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Action status must be active, blocked, or done.")
@@ -2000,8 +2119,8 @@ def update_action(connection: sqlite3.Connection, action_id: int, payload: dict)
     )
 
     connection.execute(
-        "UPDATE actions SET title = ?, owner = ?, status = ?, completion_date = ?, meeting_date = ? WHERE id = ?",
-        (title, owner or None, status, completion_date, meeting_date, action_id),
+        "UPDATE actions SET title = ?, owner = ?, status = ?, tag = ?, completion_date = ?, meeting_date = ? WHERE id = ?",
+        (title, owner or None, status, tag, completion_date, meeting_date, action_id),
     )
     row = connection.execute("SELECT * FROM actions WHERE id = ?", (action_id,)).fetchone()
     return row_to_action(row)
@@ -2105,7 +2224,7 @@ def create_update(connection: sqlite3.Connection, payload: dict) -> dict:
     project_id = int(payload.get("projectId") or payload.get("project_id") or 0)
     require_project(connection, project_id)
 
-    text = normalize_name(payload.get("text"))
+    text = normalize_project_note_text(payload.get("text"))
     if not text:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Update text is required.")
 
@@ -2141,6 +2260,7 @@ def create_update(connection: sqlite3.Connection, payload: dict) -> dict:
                 "owner": payload.get("person"),
                 "status": "blocked" if blocker else "active",
                 "source": "daily",
+                "tag": payload.get("tag") or payload.get("actionTag") or payload.get("action_tag"),
                 "completionDate": payload.get("completionDate") or payload.get("completion_date"),
                 "meetingDate": meeting_date,
             },
@@ -2162,7 +2282,7 @@ def update_project_note(connection: sqlite3.Connection, update_id: int, payload:
         raise ApiError(HTTPStatus.NOT_FOUND, "Project note not found.")
 
     if "text" in payload:
-        text = normalize_name(payload.get("text"))
+        text = normalize_project_note_text(payload.get("text"))
         if not text:
             raise ApiError(HTTPStatus.BAD_REQUEST, "Update text is required.")
     else:
@@ -3419,6 +3539,8 @@ def project_memory_items(updates: list[dict], actions: list[dict], decisions: li
         })
     for action in actions:
         details = [normalize_name(action.get("status")), normalize_name(action.get("owner"))]
+        if action.get("tag"):
+            details.append(f"#{action.get('tag')}")
         if action.get("completionDate"):
             details.append(f"due {action.get('completionDate')}")
         suffix = f" ({', '.join(detail for detail in details if detail)})" if any(details) else ""
@@ -3857,18 +3979,21 @@ def extract_actions_with_ai(notes: str, project: dict) -> dict:
                 "owner": "Sreenath" if "Sreenath" in allowed_owners else None,
                 "status": "active",
                 "completionDate": None,
+                "tag": "agent-flow",
             },
             {
                 "title": "Plan to demo the updated flow in the next call",
                 "owner": "Sreenath" if "Sreenath" in allowed_owners else None,
                 "status": "active",
                 "completionDate": None,
+                "tag": "demo",
             },
             {
                 "title": "Continue investigating APIs to retrieve complete conversation history for gap analysis",
                 "owner": "Kriti" if "Kriti" in allowed_owners else None,
                 "status": "active",
                 "completionDate": None,
+                "tag": "api",
             },
         ],
     }
@@ -3879,11 +4004,15 @@ def extract_actions_with_ai(notes: str, project: dict) -> dict:
         "Do not include markdown, code fences, comments, labels, explanations, or text outside the JSON object. "
         "The first character of your response must be { and the last character must be }. "
         "points must be a short array of important factual meeting points, not generic text. "
-        "actions must be an array of action objects with exactly these fields: title, owner, status, completionDate. "
+        "actions must be an array of action objects with exactly these fields: title, owner, status, completionDate, tag. "
         "title must be a clear imperative task without the owner name prefix. "
+        "Remove any #tag text from title and put the tag value in tag without the leading #. "
         "status must be one of active, blocked, or done; use active unless the note explicitly says blocked or done. "
         "owner must be null or exactly one value from the provided members array. "
         "Never invent owners. If a person is mentioned but is not in members, owner must be null. "
+        "If the notes include a Tag or Tags line with a #tag, apply that tag to extracted actions unless an action line has its own #tag. "
+        "If an action line includes one or more #tags, use the first #tag as that action's tag. "
+        "Use null for tag when no #tag applies. "
         "Treat sections named Next steps, Next action, Action items, Follow-ups, To do, or Todo as the highest priority source. "
         "Parse every clear line shaped like 'Owner: task' as one or more action items, even when the heading says Next action. "
         "Also parse owner-heading blocks: when a standalone line contains a person's name, treat it as the owner "
@@ -3909,6 +4038,8 @@ def extract_actions_with_ai(notes: str, project: dict) -> dict:
             "Split semicolon-separated follow-ups into separate actions.",
             "Treat each task line below an owner heading as a separate action unless it is clearly a continuation line.",
             "Use only project members as owner values; otherwise owner is null.",
+            "Treat text beginning with # as action tags. Return tag without # and do not keep #tag in the title.",
+            "A line like 'Tag: #redwood' applies #redwood to the extracted actions unless a specific action line has another #tag.",
             "Return all concrete tasks, not just one summary action.",
         ],
         "schema": {
@@ -3918,6 +4049,7 @@ def extract_actions_with_ai(notes: str, project: dict) -> dict:
                     "completionDate": "YYYY-MM-DD|null",
                     "owner": "string|null",
                     "status": "active|blocked|done",
+                    "tag": "string|null",
                     "title": "string",
                 }
             ],
@@ -4171,6 +4303,7 @@ def action_payloads_from_ai(
             skipped_duplicates += 1
             continue
         seen_actions.add(dedupe_key)
+        tag = action_tag_from_payload(action, action.get("title"), notes)
         actions.append({
             "completionDate": action.get("completionDate") or action.get("completion_date") or action.get("dueDate"),
             "meetingDate": meeting_date,
@@ -4178,6 +4311,7 @@ def action_payloads_from_ai(
             "projectId": project_id,
             "source": source,
             "status": status,
+            "tag": tag,
             "title": title,
         })
 

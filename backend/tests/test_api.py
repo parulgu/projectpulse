@@ -189,12 +189,18 @@ class ProjectPulseApiTest(unittest.TestCase):
                 "owner": "Asha",
                 "projectId": project["id"],
                 "status": "active",
+                "tag": "#frontend",
                 "title": "Wire frontend API",
             },
         )
         self.assertEqual(status, 201)
         self.assertEqual(action["action"]["projectId"], project["id"])
         self.assertEqual(action["action"]["completionDate"], "2026-06-01")
+        self.assertEqual(action["action"]["tag"], "frontend")
+
+        status, tagged = self.client.request("PATCH", f"/api/actions/{action['action']['id']}", {"tag": "#api"})
+        self.assertEqual(status, 200)
+        self.assertEqual(tagged["action"]["tag"], "api")
 
         status, replaced_members = self.client.request(
             "PATCH",
@@ -433,6 +439,42 @@ class ProjectPulseApiTest(unittest.TestCase):
 
         suggestions = memory_suggestions_from_notes("The team agreed to use the Redwood design.")
         self.assertIn("agreed to use the Redwood design", suggestions["decisions"][0])
+
+    def test_project_note_preserves_and_repairs_meeting_formatting(self) -> None:
+        formatted_note = (
+            "Dynamic Caching – Meeting Summary\n\n"
+            "Purpose The Dynamic Caching initiative aims to improve visibility.\n\n"
+            "Phase 1 – Cache Visibility and Sizing\n"
+            "- Measure memory usage of cache objects.\n"
+            "- Improve diagnostics and logging."
+        )
+        status, payload = self.client.request(
+            "POST",
+            "/api/updates",
+            {
+                "projectId": 1,
+                "text": formatted_note,
+                "meetingDate": "2026-06-23",
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["update"]["text"], formatted_note)
+
+        flattened_note = (
+            "Dynamic Caching – Meeting Summary Purpose The Dynamic Caching initiative aims to improve visibility. "
+            "Phase 1 – Cache Visibility and Sizing - Measure memory usage of cache objects. "
+            "- Improve diagnostics and logging. Conclusion Measure → Plan → Automate"
+        )
+        status, updated = self.client.request(
+            "PATCH",
+            f"/api/updates/{payload['update']['id']}",
+            {"text": flattened_note},
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("\n\nPurpose", updated["update"]["text"])
+        self.assertIn("\n\nPhase 1", updated["update"]["text"])
+        self.assertIn("\n- Measure memory usage", updated["update"]["text"])
+        self.assertIn("\n\nConclusion", updated["update"]["text"])
 
     def test_manual_decision_can_be_created_updated_and_deleted(self) -> None:
         status, created = self.client.request(
@@ -1113,6 +1155,30 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(extracted["actions"][0]["owner"], "AA")
         self.assertEqual(extracted["actions"][0]["meetingDate"], "2026-05-29")
         self.assertEqual(extracted["actions"][0]["completionDate"], date.today().isoformat())
+
+    def test_ai_extraction_uses_hashtag_as_action_tag(self) -> None:
+        status, created = self.client.request(
+            "POST",
+            "/api/projects",
+            {"name": "Tagged Extraction", "classification": "Work", "roleDetails": {"developers": "AA"}},
+        )
+        self.assertEqual(status, 201)
+        project_id = created["project"]["id"]
+
+        with patch("backend.app.extract_actions_with_ai", return_value={"points": [], "actions": []}):
+            status, extracted = self.client.request(
+                "POST",
+                f"/api/projects/{project_id}/extract-actions",
+                {
+                    "meetingDate": "2026-05-29",
+                    "notes": "Next steps:\nTag: #redwood\nAA: Complete UI #frontend",
+                    "source": "meeting",
+                },
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(extracted["actions"][0]["title"], "Complete UI")
+        self.assertEqual(extracted["actions"][0]["tag"], "frontend")
 
     def test_ai_extraction_preview_can_be_confirmed_and_bulk_deleted(self) -> None:
         status, created = self.client.request(

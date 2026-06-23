@@ -37,22 +37,22 @@ const meetingTemplates = [
   {
     id: "standup",
     label: "Standup",
-    text: "Standup\n\nCompleted:\n- \n\nToday:\n- \n\nBlockers:\n- \n\nNext steps:\n- ",
+    text: "Standup\n\nTag: #\n\nCompleted:\n- \n\nToday:\n- \n\nBlockers:\n- \n\nNext steps:\n- ",
   },
   {
     id: "weekly",
     label: "Weekly review",
-    text: "Weekly review\n\nCompleted this week:\n- \n\nPending:\n- \n\nBlocked or at risk:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
+    text: "Weekly review\n\nTag: #\n\nCompleted this week:\n- \n\nPending:\n- \n\nBlocked or at risk:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
   },
   {
     id: "bug-triage",
     label: "Bug triage",
-    text: "Bug triage\n\nHigh priority bugs:\n- \n\nOwners:\n- \n\nRisks:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
+    text: "Bug triage\n\nTag: #\n\nHigh priority bugs:\n- \n\nOwners:\n- \n\nRisks:\n- \n\nDecisions:\n- \n\nNext steps:\n- ",
   },
   {
     id: "planning",
     label: "Planning",
-    text: "Planning meeting\n\nScope:\n- \n\nDependencies:\n- \n\nDecisions:\n- \n\nAction items:\n- ",
+    text: "Planning meeting\n\nTag: #\n\nScope:\n- \n\nDependencies:\n- \n\nDecisions:\n- \n\nAction items:\n- ",
   },
 ];
 
@@ -124,6 +124,21 @@ function labelForClassification(classification) {
 
 function normalizeName(name) {
   return name.trim().replace(/\s+/g, " ");
+}
+
+function actionTagValue(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^#+/, "")
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 64);
+}
+
+function actionTagLabel(action) {
+  const tag = actionTagValue(action?.tag);
+  return tag ? `#${tag}` : "";
 }
 
 function linkHrefFromText(value) {
@@ -203,7 +218,8 @@ function projectSummaryText(project, summary) {
 function formattedActionTitle(action) {
   const owner = action.owner ? ` (${action.owner})` : "";
   const due = action.completionDate ? `, due ${formatDisplayDate(action.completionDate)}` : "";
-  return `${action.title}${owner}${due}`;
+  const tag = actionTagLabel(action);
+  return `${action.title}${owner}${due}${tag ? ` ${tag}` : ""}`;
 }
 
 function timestampForSort(value) {
@@ -242,6 +258,7 @@ function projectMemoryItems({ actions = [], decisions = [], updates = [] }) {
     meta: [
       actionStatusLabel(action.status),
       action.owner || "Unassigned",
+      actionTagLabel(action),
       action.completionDate ? `Due ${formatDisplayDate(action.completionDate)}` : "",
     ].filter(Boolean).join(" · "),
     text: action.title,
@@ -319,6 +336,12 @@ function actionMatchesMeetingRange(action, meetingStartDate, meetingEndDate) {
   return true;
 }
 
+function actionMatchesTagSearch(action, tagSearch) {
+  const query = actionTagValue(tagSearch).toLowerCase();
+  if (!query) return true;
+  return actionTagValue(action.tag).toLowerCase().includes(query);
+}
+
 function actionAgeLabel(action) {
   if (!action?.createdAt || action.status === "done") return "";
   const created = new Date(action.createdAt);
@@ -389,6 +412,7 @@ function dedupeActionsForDisplay(actions) {
       normalizeName(action.title).toLowerCase(),
       normalizeName(action.owner || "").toLowerCase(),
       action.status,
+      actionTagValue(action.tag).toLowerCase(),
       action.completionDate || "",
       action.meetingDate || "",
     ].join("|");
@@ -404,6 +428,12 @@ function ActionMeetingTag({ action }) {
   return <span className="meta-pill meeting">Meeting {formatDisplayDate(action.meetingDate)}</span>;
 }
 
+function ActionTagPill({ action }) {
+  const tag = actionTagLabel(action);
+  if (!tag) return null;
+  return <span className="meta-pill tag">{tag}</span>;
+}
+
 function makeDraftActionId() {
   return `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -416,6 +446,7 @@ function draftActionKey(action) {
   return [
     normalizeName(action.title).toLowerCase(),
     normalizeName(action.owner).toLowerCase(),
+    actionTagValue(action.tag).toLowerCase(),
     action.completionDate || "",
   ].join("|");
 }
@@ -1176,15 +1207,7 @@ function ProjectSummary({
               </span>
             ))}
           </div>
-          <button
-            className="primary-action"
-            disabled={isSummarizingProject || !hasSummarySource}
-            onClick={handleSummaryRequest}
-            title={hasSummarySource ? "Create Pulse Report" : "Add project data before creating a Pulse Report"}
-            type="button"
-          >
-            {isSummarizingProject ? "Creating" : "Pulse Report"}
-          </button>
+          
           <button
             aria-label="Ask Project Pulse"
             className="primary-action project-ask-button"
@@ -2442,6 +2465,7 @@ function StatusBoard({
   onDeleteActions,
   onOwnerChange,
   onStatusChange,
+  onTagChange,
   project,
 }) {
   const [completionDate, setCompletionDate] = useState("");
@@ -2450,6 +2474,7 @@ function StatusBoard({
   const [dragOverStatus, setDragOverStatus] = useState(null);
   const [editingDateActionId, setEditingDateActionId] = useState(null);
   const [editingOwnerActionId, setEditingOwnerActionId] = useState(null);
+  const [editingTagActionId, setEditingTagActionId] = useState(null);
   const [editError, setEditError] = useState("");
   const [editingActionId, setEditingActionId] = useState(null);
   const [isDoneExpanded, setIsDoneExpanded] = useState(false);
@@ -2461,6 +2486,9 @@ function StatusBoard({
   const [owner, setOwner] = useState("");
   const [ownerFilter, setOwnerFilter] = useState("all");
   const [selectedActionIds, setSelectedActionIds] = useState([]);
+  const [tag, setTag] = useState("");
+  const [tagDraft, setTagDraft] = useState("");
+  const [tagSearch, setTagSearch] = useState("");
   const [title, setTitle] = useState("");
   const [density, setDensity] = useState("compact");
 
@@ -2471,6 +2499,7 @@ function StatusBoard({
     setDragOverStatus(null);
     setEditingDateActionId(null);
     setEditingOwnerActionId(null);
+    setEditingTagActionId(null);
     setEditError("");
     setEditingActionId(null);
     setIsDoneExpanded(false);
@@ -2482,6 +2511,9 @@ function StatusBoard({
     setOwner("");
     setOwnerFilter("all");
     setSelectedActionIds([]);
+    setTag("");
+    setTagDraft("");
+    setTagSearch("");
     setTitle("");
     setDensity("compact");
   }, [project.id]);
@@ -2495,6 +2527,7 @@ function StatusBoard({
     setDraftTitle(action.title);
     setEditingDateActionId(null);
     setEditingOwnerActionId(null);
+    setEditingTagActionId(null);
     setEditError("");
     setEditingActionId(action.id);
     setOpenActionMenuId(null);
@@ -2540,10 +2573,12 @@ function StatusBoard({
       completionDate: completionDate || null,
       owner: owner || null,
       status: "active",
+      tag: tag || null,
       title,
     });
     setCompletionDate("");
     setOwner("");
+    setTag("");
     setTitle("");
     setIsAddingAction(false);
   }
@@ -2551,8 +2586,21 @@ function StatusBoard({
   function cancelAddAction() {
     setCompletionDate("");
     setOwner("");
+    setTag("");
     setTitle("");
     setIsAddingAction(false);
+  }
+
+  async function saveActionTag(event, action) {
+    event.preventDefault();
+    await onTagChange(action.id, tagDraft || null);
+    setEditingTagActionId(null);
+    setTagDraft("");
+  }
+
+  function cancelActionTagEdit() {
+    setEditingTagActionId(null);
+    setTagDraft("");
   }
 
   function handleSelectAction(actionId, checked) {
@@ -2580,6 +2628,7 @@ function StatusBoard({
     setDueFilter("all");
     setMeetingStartDate("");
     setMeetingEndDate("");
+    setTagSearch("");
   }
 
   const displayActions = dedupeActionsForDisplay(actions);
@@ -2591,6 +2640,7 @@ function StatusBoard({
       return (
         ownerMatches &&
         actionMatchesDueFilter(action, dueFilter) &&
+        actionMatchesTagSearch(action, tagSearch) &&
         actionMatchesMeetingRange(action, meetingStartDate, meetingEndDate)
       );
     },
@@ -2631,6 +2681,15 @@ function StatusBoard({
               <option value="week">This week</option>
             </select>
           </label>
+          <label className="compact-filter tag-filter">
+            Tag
+            <input
+              onChange={(event) => setTagSearch(event.target.value)}
+              placeholder="#tag"
+              type="search"
+              value={tagSearch}
+            />
+          </label>
           <label className="compact-filter date-filter">
             Meeting from
             <input
@@ -2650,7 +2709,7 @@ function StatusBoard({
           <button
             aria-label="Clear action board filters"
             className="icon-action-button board-clear-filter-button"
-            disabled={ownerFilter === "all" && dueFilter === "all" && !meetingStartDate && !meetingEndDate}
+            disabled={ownerFilter === "all" && dueFilter === "all" && !tagSearch && !meetingStartDate && !meetingEndDate}
             onClick={clearActionBoardFilters}
             title="Clear filters"
             type="button"
@@ -2835,6 +2894,7 @@ function StatusBoard({
                         className="meta-pill owner"
                         onClick={() => {
                           setEditingDateActionId(null);
+                          setEditingTagActionId(null);
                           setEditingOwnerActionId(action.id);
                         }}
                         type="button"
@@ -2857,6 +2917,7 @@ function StatusBoard({
                         className="meta-pill date"
                         onClick={() => {
                           setEditingOwnerActionId(null);
+                          setEditingTagActionId(null);
                           setEditingDateActionId(action.id);
                         }}
                         type="button"
@@ -2872,6 +2933,42 @@ function StatusBoard({
                         }}
                         variant="card"
                       />
+                    )}
+                    {editingTagActionId === action.id ? (
+                      <form className="action-tag-edit-form" onSubmit={(event) => saveActionTag(event, action)}>
+                        <input
+                          aria-label={`Tag for ${action.title}`}
+                          autoFocus
+                          onChange={(event) => setTagDraft(event.target.value)}
+                          placeholder="#tag"
+                          value={tagDraft}
+                        />
+                        <button aria-label="Save action tag" className="icon-action-button confirm" title="Save" type="submit">
+                          <CheckIcon />
+                        </button>
+                        <button
+                          aria-label="Cancel action tag edit"
+                          className="icon-action-button"
+                          onClick={cancelActionTagEdit}
+                          title="Cancel"
+                          type="button"
+                        >
+                          <XIcon />
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        className={`meta-pill tag ${action.tag ? "" : "empty"}`}
+                        onClick={() => {
+                          setEditingOwnerActionId(null);
+                          setEditingDateActionId(null);
+                          setEditingTagActionId(action.id);
+                          setTagDraft(actionTagLabel(action));
+                        }}
+                        type="button"
+                      >
+                        {actionTagLabel(action) || "No tag"}
+                      </button>
                     )}
                     <ActionDueIndicator action={action} />
                     <ActionAgeIndicator action={action} />
@@ -2918,6 +3015,14 @@ function StatusBoard({
                     </option>
                   ))}
                 </select>
+              </label>
+              <label>
+                Tag
+                <input
+                  onChange={(event) => setTag(event.target.value)}
+                  placeholder="#tag"
+                  value={tag}
+                />
               </label>
               <label>
                 Complete by
@@ -2970,6 +3075,7 @@ function MeetingNotes({
   const [extractionStatus, setExtractionStatus] = useState(null);
   const [meetingActionDueDate, setMeetingActionDueDate] = useState("");
   const [meetingActionOwner, setMeetingActionOwner] = useState("");
+  const [meetingActionTag, setMeetingActionTag] = useState("");
   const [meetingActionTitle, setMeetingActionTitle] = useState("");
   const [meetingDate, setMeetingDate] = useState(todayDateInputValue());
   const [notes, setNotes] = useState("");
@@ -2994,6 +3100,9 @@ function MeetingNotes({
   const [decisionDateToFilter, setDecisionDateToFilter] = useState("");
   const [decisionOwnerFilter, setDecisionOwnerFilter] = useState("all");
   const [decisionStatusFilter, setDecisionStatusFilter] = useState("all");
+  const [noteDateFromFilter, setNoteDateFromFilter] = useState("");
+  const [noteDateToFilter, setNoteDateToFilter] = useState("");
+  const [expandedNoteIds, setExpandedNoteIds] = useState([]);
   const [uploadedFileName, setUploadedFileName] = useState("");
   const [uploadError, setUploadError] = useState("");
 
@@ -3016,6 +3125,7 @@ function MeetingNotes({
     setIsAddingMeetingAction(false);
     setMeetingActionDueDate("");
     setMeetingActionOwner("");
+    setMeetingActionTag("");
     setMeetingActionTitle("");
     setMeetingDate(todayDateInputValue());
     setMemoryTab("decisions");
@@ -3027,6 +3137,9 @@ function MeetingNotes({
     setDecisionDateToFilter("");
     setDecisionOwnerFilter("all");
     setDecisionStatusFilter("all");
+    setNoteDateFromFilter("");
+    setNoteDateToFilter("");
+    setExpandedNoteIds([]);
     setPreview(null);
     setSelectedDraftActionIds([]);
     setSelectedDraftMemoryIds([]);
@@ -3067,11 +3180,21 @@ function MeetingNotes({
   });
   const hasDecisionFilters =
     decisionOwnerFilter !== "all" || decisionStatusFilter !== "all" || decisionDateFromFilter || decisionDateToFilter;
+  const filteredUpdates = updates.filter((update) => {
+    const dateTime = update.meetingDate ? parseDateOnly(update.meetingDate)?.getTime() : null;
+    const fromTime = noteDateFromFilter ? parseDateOnly(noteDateFromFilter)?.getTime() : null;
+    const toTime = noteDateToFilter ? parseDateOnly(noteDateToFilter)?.getTime() : null;
+    const fromMatches = !Number.isFinite(fromTime) || (Number.isFinite(dateTime) && dateTime >= fromTime);
+    const toMatches = !Number.isFinite(toTime) || (Number.isFinite(dateTime) && dateTime <= toTime);
+    return fromMatches && toMatches;
+  });
+  const hasNoteFilters = noteDateFromFilter || noteDateToFilter;
 
   function beginNoteEdit(update) {
     setEditingNoteId(update.id);
     setEditingNoteDate(update.meetingDate || "");
     setEditingNoteText(update.text);
+    setExpandedNoteIds((currentIds) => (currentIds.includes(update.id) ? currentIds : currentIds.concat(update.id)));
   }
 
   async function handleNoteUpdate(event) {
@@ -3084,6 +3207,51 @@ function MeetingNotes({
     setEditingNoteId(null);
     setEditingNoteDate("");
     setEditingNoteText("");
+  }
+
+  function cancelNoteEdit() {
+    setEditingNoteId(null);
+    setEditingNoteDate("");
+    setEditingNoteText("");
+  }
+
+  function toggleProjectNote(updateId) {
+    setExpandedNoteIds((currentIds) =>
+      currentIds.includes(updateId)
+        ? currentIds.filter((currentId) => currentId !== updateId)
+        : currentIds.concat(updateId),
+    );
+  }
+
+  function clearNotesWorkspace() {
+    setNotes("");
+    setUploadedFileName("");
+    setLastSavedNoteKey("");
+  }
+
+  async function addNotesWithoutExtraction(source) {
+    if (!notes.trim()) {
+      setExtractError("Add notes before saving.");
+      return;
+    }
+
+    try {
+      setIsExtracting(true);
+      setExtractError("");
+      setExtractionStatus({ message: "Saving note", tone: "progress" });
+      await onSaveProjectNote({ meetingDate, text: notes, source });
+      setExtractionStatus({ message: "Note added", tone: "success" });
+      setPreview(null);
+      setSelectedDraftActionIds([]);
+      setSelectedDraftMemoryIds([]);
+      setEditingDraftActionId(null);
+      setEditingDraftSnapshot(null);
+      clearNotesWorkspace();
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : "Could not add notes.");
+    } finally {
+      setIsExtracting(false);
+    }
   }
 
   async function extractFromNotes(source) {
@@ -3118,6 +3286,7 @@ function MeetingNotes({
               owner: action.owner || "",
               source: action.source || source,
               status: action.status || "active",
+              tag: action.tag || "",
               title: action.title || "",
             }))
           : [],
@@ -3256,10 +3425,12 @@ function MeetingNotes({
       owner: meetingActionOwner || null,
       source: "meeting",
       status: "active",
+      tag: meetingActionTag || null,
       title: meetingActionTitle,
     });
     setMeetingActionDueDate("");
     setMeetingActionOwner("");
+    setMeetingActionTag("");
     setMeetingActionTitle("");
     setIsAddingMeetingAction(false);
   }
@@ -3267,6 +3438,7 @@ function MeetingNotes({
   function cancelMeetingAction() {
     setMeetingActionDueDate("");
     setMeetingActionOwner("");
+    setMeetingActionTag("");
     setMeetingActionTitle("");
     setIsAddingMeetingAction(false);
   }
@@ -3373,6 +3545,7 @@ function MeetingNotes({
           owner: "",
           source: basePreview.source || "meeting",
           status: "active",
+          tag: "",
           title: "",
         }),
       };
@@ -3546,6 +3719,7 @@ function MeetingNotes({
         message: `${decisionsToSave.length + blockersToSave.length} memory updates added`,
         tone: "success",
       });
+      clearNotesWorkspace();
     } catch (error) {
       setExtractError(error instanceof Error ? error.message : "Could not add memory updates.");
     } finally {
@@ -3562,6 +3736,7 @@ function MeetingNotes({
         owner: action.owner || null,
         source: action.source || preview.source || "meeting",
         status: action.status || "active",
+        tag: action.tag || null,
         title: action.title.trim(),
       }))
       .filter((action) => action.title);
@@ -3577,8 +3752,7 @@ function MeetingNotes({
       const confirmedActions = await onConfirmExtractedActions(actionsToConfirm);
       setExtractionStatus({ message: `${confirmedActions.length} actions added`, tone: "success" });
       setPreview(null);
-      setNotes("");
-      setUploadedFileName("");
+      clearNotesWorkspace();
       setSelectedDraftActionIds([]);
       setSelectedDraftMemoryIds([]);
       setBulkDraftOwner("");
@@ -3676,8 +3850,11 @@ function MeetingNotes({
                   type="file"
                 />
               </label>
-              <button className="primary-action compact" disabled={isExtracting} onClick={() => extractFromNotes("meeting")} type="button">
+              <button className="primary-action compact notes-action-button" disabled={isExtracting} onClick={() => extractFromNotes("meeting")} type="button">
                 {isExtracting ? "Extracting" : "Extract"}
+              </button>
+              <button className="primary-action compact notes-action-button" disabled={isExtracting} onClick={() => addNotesWithoutExtraction("meeting")} type="button">
+                Add
               </button>
               {uploadedFileName ? <span className="upload-file-name">{uploadedFileName}</span> : null}
             </div>
@@ -3728,6 +3905,14 @@ function MeetingNotes({
                       </option>
                     ))}
                   </select>
+                </label>
+                <label>
+                  Tag
+                  <input
+                    onChange={(event) => setMeetingActionTag(event.target.value)}
+                    placeholder="#tag"
+                    value={meetingActionTag}
+                  />
                 </label>
                 <label>
                   Complete by
@@ -3825,6 +4010,7 @@ function MeetingNotes({
                       preview.confirmed ? (
                         <div className="extracted-action-review-row confirmed" key={action.id ?? action.draftId}>
                           <strong>{action.title}</strong>
+                          {actionTagLabel(action) ? <span>{actionTagLabel(action)}</span> : null}
                         </div>
                       ) : editingDraftActionId === action.draftId ? (
                         <div className="extracted-action-edit-card" key={action.draftId}>
@@ -3863,6 +4049,14 @@ function MeetingNotes({
                                   </option>
                                 ))}
                               </select>
+                            </label>
+                            <label>
+                              Tag
+                              <input
+                                onChange={(event) => handleDraftActionChange(action.draftId, "tag", event.target.value)}
+                                placeholder="#tag"
+                                value={action.tag || ""}
+                              />
                             </label>
                             <label>
                               Complete by
@@ -3907,6 +4101,7 @@ function MeetingNotes({
                             <strong>{action.title || "Untitled action"}</strong>
                             <span>
                               {action.owner || "Unassigned"}
+                              {actionTagLabel(action) ? ` · ${actionTagLabel(action)}` : ""}
                               {action.completionDate ? ` · ${formatDisplayDate(action.completionDate)}` : ""}
                             </span>
                           </div>
@@ -4311,16 +4506,49 @@ function MeetingNotes({
           </button>
           {isFeedExpanded ? (
             <div className="feed-content">
+            <div className="filter-row note-filter-row">
+              <label className="compact-filter date-filter">
+                From
+                <input onChange={(event) => setNoteDateFromFilter(event.target.value)} type="date" value={noteDateFromFilter} />
+              </label>
+              <label className="compact-filter date-filter">
+                To
+                <input onChange={(event) => setNoteDateToFilter(event.target.value)} type="date" value={noteDateToFilter} />
+              </label>
+              <button
+                aria-label="Clear project note filters"
+                className="icon-action-button board-clear-filter-button"
+                disabled={!hasNoteFilters}
+                onClick={() => {
+                  setNoteDateFromFilter("");
+                  setNoteDateToFilter("");
+                }}
+                title="Clear filters"
+                type="button"
+              >
+                <XIcon />
+              </button>
+            </div>
             <div className="updates-feed">
-              {updates.length ? (
-                updates.map((update) => (
+              {filteredUpdates.length ? (
+                filteredUpdates.map((update) => {
+                  const isNoteExpanded = expandedNoteIds.includes(update.id) || editingNoteId === update.id;
+                  return (
                 <article className="update-card" key={update.id}>
                   <div className="card-row">
-                    <strong>
-                      {update.meetingDate
-                        ? `Meeting on ${formatDisplayDate(update.meetingDate)}`
-                        : update.person || "General update"}
-                    </strong>
+                    <button
+                      aria-expanded={isNoteExpanded}
+                      className="project-note-toggle"
+                      onClick={() => toggleProjectNote(update.id)}
+                      type="button"
+                    >
+                      {isNoteExpanded ? <ChevronLeftIcon /> : <ChevronRightIcon />}
+                      <strong>
+                        {update.meetingDate
+                          ? `Meeting on ${formatDisplayDate(update.meetingDate)}`
+                          : update.person || "General update"}
+                      </strong>
+                    </button>
                     <span className="note-card-actions">
                       <button
                         aria-label="Edit project note"
@@ -4352,6 +4580,7 @@ function MeetingNotes({
                       />
                       <textarea
                         aria-label="Project note text"
+                        className="project-note-text"
                         onChange={(event) => setEditingNoteText(event.target.value)}
                         rows="4"
                         value={editingNoteText}
@@ -4363,7 +4592,7 @@ function MeetingNotes({
                         <button
                           aria-label="Cancel project note edit"
                           className="icon-action-button"
-                          onClick={() => setEditingNoteId(null)}
+                          onClick={cancelNoteEdit}
                           title="Cancel"
                           type="button"
                         >
@@ -4372,16 +4601,21 @@ function MeetingNotes({
                       </div>
                     </form>
                   ) : (
+                    isNoteExpanded ? (
                     <>
                       {update.meetingDate && update.person ? <p className="update-meta">{update.person}</p> : null}
-                      <p>{update.text}</p>
+                      <p className="project-note-text">{update.text}</p>
                     </>
+                    ) : null
                   )}
                 </article>
-              ))
+                  );
+                })
             ) : (
               <p className="empty-state">
-                No project notes yet. Paste meeting notes above and extract actions; the notes will be saved here.
+                {updates.length
+                  ? "No project notes match the selected dates."
+                  : "No project notes yet. Paste meeting notes above and extract actions; the notes will be saved here."}
               </p>
             )}
             </div>
@@ -4713,6 +4947,7 @@ function DashboardLevelView({
                 <strong>{action.title}</strong>
                 <span>{projectName(action.projectId)} · {action.owner || "Unassigned"}</span>
                 <div className="portfolio-item-tags">
+                  <ActionTagPill action={action} />
                   <ActionDueIndicator action={action} />
                   <ActionAgeIndicator action={action} />
                 </div>
@@ -4730,6 +4965,9 @@ function DashboardLevelView({
               <article className="portfolio-item" key={action.id}>
                 <strong>{action.title}</strong>
                 <span>{projectName(action.projectId)} · {action.owner || "Unassigned"}</span>
+                <div className="portfolio-item-tags">
+                  <ActionTagPill action={action} />
+                </div>
               </article>
             ))
           ) : (
@@ -4848,6 +5086,7 @@ function DashboardPanel({
   onSaveDecision,
   onSaveProjectNote,
   onStatusChange,
+  onTagChange,
   onTabChange,
   onUpdatePhase,
   onUpdatePhaseItem,
@@ -4931,6 +5170,7 @@ function DashboardPanel({
       onDeleteActions={onDeleteActions}
       onOwnerChange={onOwnerChange}
       onStatusChange={onStatusChange}
+      onTagChange={onTagChange}
       project={project}
     />
   );
@@ -4972,6 +5212,7 @@ function DashboardShell({
   onSaveDecision,
   onSaveProjectNote,
   onStatusChange,
+  onTagChange,
   onTabChange,
   onUpdatePhase,
   onUpdatePhaseItem,
@@ -5395,6 +5636,7 @@ function DashboardShell({
           onSaveDecision={onSaveDecision}
           onSaveProjectNote={onSaveProjectNote}
           onStatusChange={onStatusChange}
+          onTagChange={onTagChange}
           onTabChange={onTabChange}
           onUpdatePhase={onUpdatePhase}
           onUpdatePhaseItem={onUpdatePhaseItem}
@@ -5738,6 +5980,7 @@ function App() {
           projectId,
           source: actionInput.source,
           status: actionInput.status,
+          tag: actionInput.tag,
           title: actionInput.title.trim(),
         }),
         method: "POST",
@@ -5868,6 +6111,24 @@ function App() {
     }
   }
 
+  async function handleActionTagChange(actionId, tag) {
+    try {
+      setApiError("");
+      const { action: updatedAction } = await apiRequest(`/actions/${actionId}`, {
+        body: JSON.stringify({ tag }),
+        method: "PATCH",
+      });
+
+      setActions((currentActions) =>
+        currentActions.map((action) => (action.id === actionId ? updatedAction : action)),
+      );
+      showToast(updatedAction.tag ? `Tag set to #${updatedAction.tag}` : "Tag cleared");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not update action tag.");
+      throw error;
+    }
+  }
+
   async function handleDeleteAction(actionToDelete) {
     if (!actionToDelete) return;
 
@@ -5935,6 +6196,7 @@ function App() {
             projectId: selectedProject.id,
             source: action.source || "meeting",
             status: action.status,
+            tag: action.tag,
             title: action.title,
           })),
         }),
@@ -6484,6 +6746,7 @@ function App() {
               onSaveDecision={handleSaveDecision}
               onSaveProjectNote={handleSaveProjectNote}
               onStatusChange={handleStatusChange}
+              onTagChange={handleActionTagChange}
               onTabChange={setActiveTab}
               onUpdatePhase={handleUpdatePhase}
               onUpdatePhaseItem={handleUpdatePhaseItem}

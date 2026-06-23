@@ -1989,7 +1989,7 @@ textarea:focus-visible {
   align-items: end;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(180px, 240px) auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 240px) auto auto auto minmax(0, 1fr);
 }
 
 .meeting-template-field {
@@ -1999,6 +1999,12 @@ textarea:focus-visible {
 .meeting-template-field select {
   min-height: 34px;
   padding: 7px 9px;
+}
+
+.notes-action-button {
+  justify-self: start;
+  min-width: 74px;
+  width: auto;
 }
 
 .status-board-wrap {
@@ -2405,6 +2411,33 @@ textarea:focus-visible {
   color: #514087;
 }
 
+.meta-pill.tag {
+  background: #eef8ef;
+  border-color: #cde7d2;
+  color: #2f6d44;
+}
+
+.meta-pill.tag.empty {
+  background: #f7fafb;
+  border-color: #dfe7eb;
+  color: #84929a;
+}
+
+.action-tag-edit-form {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.action-tag-edit-form input {
+  border-radius: 6px;
+  font-size: 12px;
+  min-height: 28px;
+  padding: 4px 7px;
+  width: 110px;
+}
+
 .action-meta-row {
   align-items: center;
   display: flex;
@@ -2516,6 +2549,10 @@ textarea:focus-visible {
 
 .compact-filter.date-filter input {
   width: 155px;
+}
+
+.compact-filter.tag-filter input {
+  width: 132px;
 }
 
 .filter-note {
@@ -2906,6 +2943,36 @@ textarea:focus-visible {
 
 .project-notes-section {
   padding-top: 0;
+}
+
+.note-filter-row {
+  margin-bottom: 10px;
+}
+
+.project-note-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.project-note-toggle svg {
+  color: var(--muted);
+  height: 14px;
+  width: 14px;
+}
+
+.project-note-toggle strong {
+  overflow-wrap: anywhere;
+}
+
+.project-note-text {
+  white-space: pre-wrap;
 }
 
 .decision-list {
@@ -3390,7 +3457,7 @@ textarea:focus-visible {
 .draft-edit-fields {
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(180px, 1.4fr) minmax(112px, 0.55fr) minmax(104px, 0.5fr) minmax(132px, 0.6fr);
+  grid-template-columns: minmax(180px, 1.4fr) minmax(112px, 0.55fr) minmax(104px, 0.5fr) minmax(104px, 0.5fr) minmax(132px, 0.6fr);
 }
 
 .draft-edit-fields label {
