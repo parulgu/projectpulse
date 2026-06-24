@@ -1,0 +1,17 @@
+{
+  "oci": {
+    "compartmentId": "ocid1.compartment.oc1..aaaaaaaar6roofswkpw5w36k67idfu5i5gsaanketfwi43qvohtkc3pgduxa",
+    "serviceEndpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+    "modelId": "cohere.command-a-03-2025",
+    "authType": "API_KEY",
+    "authProfile": "DEFAULT"
+  },
+  "bugdb": {
+    "mcpEndpoint": "https://bug.oraclecorp.com/mcp",
+    "tokenUrl": "https://idcs-9dc693e80d9b469480d7afe00e743931.identity.oraclecloud.com/oauth2/v1/token",
+    "clientId": "4549cc65c8204e698485ed2322400141",
+    "clientSecret": "idcscs-f60a09df-b0f1-46b9-b53c-09bc732da331",
+    "oauthScope": "bug.rest.idcs",
+    "verifySsl": true
+}
+}

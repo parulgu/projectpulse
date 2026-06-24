@@ -415,38 +415,14 @@ PROJECT_METADATA_FIELDS = {"epic", "targetRelease"}
 
 DEFAULT_PROJECT_ROLES = {field: "" for field in PROJECT_ROLE_FIELDS}
 
-DEFAULT_PHASE_TEMPLATE = [
-    {
-        "name": "Discovery",
-        "milestone": "Discovery complete",
-        "items": ["Problem statement", "Resource identified", "Success criteria", "Initial risks", "Planning"],
-    },
-    {
-        "name": "Requirements",
-        "milestone": "Requirements complete",
-        "items": ["Scope", "Estimates", "Dependencies", "Delivery risks"],
-    },
-    {
-        "name": "Implementation",
-        "milestone": "Implementation complete",
-        "items": ["Architecture", "API design", "Repository Changes", "Code Changes", "Security"],
-    },
-    {
-        "name": "Delivery",
-        "milestone": "Delivery complete",
-        "items": ["Code review", "Unit testing", "PSRTesting", "BOM Updates"],
-    },
-    {
-        "name": "QA testing",
-        "milestone": "QA testing complete",
-        "items": ["Regression", "Feature testing", "Bug testing"],
-    },
-    {
-        "name": "Delivery",
-        "milestone": "Release delivery complete",
-        "items": ["Release notes", "Bookshelf Update"],
-    },
-]
+MILESTONE_STATUS_VALUES = {
+    "not_started": "Not Started",
+    "in_progress": "In Progress",
+    "blocked": "Blocked",
+    "complete": "Complete",
+    "not_applicable": "Not Applicable",
+}
+TERMINAL_MILESTONE_STATUSES = {MILESTONE_STATUS_VALUES["complete"], MILESTONE_STATUS_VALUES["not_applicable"]}
 
 
 class ApiError(Exception):
@@ -559,6 +535,27 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS milestone_phases (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS milestone_subtypes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              phase_id INTEGER NOT NULL REFERENCES milestone_phases(id) ON DELETE CASCADE,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              owner TEXT,
+              status TEXT NOT NULL DEFAULT 'Not Started',
+              link TEXT NOT NULL DEFAULT '',
+              comments TEXT NOT NULL DEFAULT '',
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS phase_items (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               phase_id INTEGER NOT NULL REFERENCES project_phases(id) ON DELETE CASCADE,
@@ -598,7 +595,6 @@ def init_db(db_path: str | Path, seed: bool = True) -> None:
 
         if seed and connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0:
             seed_database(connection)
-        backfill_default_phases(connection)
 
 
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -674,39 +670,6 @@ def ensure_project_links_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
-
-
-def backfill_default_phases(connection: sqlite3.Connection) -> None:
-    for project in connection.execute("SELECT id FROM projects"):
-        ensure_default_phases(connection, project["id"])
-
-
-def ensure_default_phases(connection: sqlite3.Connection, project_id: int) -> None:
-    existing_count = connection.execute(
-        "SELECT COUNT(*) FROM project_phases WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()[0]
-    if existing_count:
-        return
-
-    timestamp = now_iso()
-    for phase_index, phase in enumerate(DEFAULT_PHASE_TEMPLATE):
-        cursor = connection.execute(
-            """
-            INSERT INTO project_phases (project_id, name, milestone, sort_order, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (project_id, phase["name"], phase["milestone"], phase_index, timestamp),
-        )
-        phase_id = cursor.lastrowid
-        for item_index, item in enumerate(phase["items"]):
-            connection.execute(
-                """
-                INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
-                VALUES (?, ?, ?, 0, ?, ?)
-                """,
-                (phase_id, project_id, item, item_index, timestamp),
-            )
 
 
 def seed_database(connection: sqlite3.Connection) -> None:
@@ -1406,48 +1369,60 @@ def row_to_bug_query(row: sqlite3.Row) -> dict:
     }
 
 
-def phase_status(items: list[dict]) -> str:
-    if not items:
+def milestone_phase_status(subtypes: list[dict]) -> str:
+    if not subtypes:
         return "not_started"
-    if all(item["completed"] for item in items):
+    statuses = [subtype["status"] for subtype in subtypes]
+    if all(status in TERMINAL_MILESTONE_STATUSES for status in statuses):
         return "done"
-    if any(item["completed"] for item in items):
+    if any(status == MILESTONE_STATUS_VALUES["blocked"] for status in statuses):
+        return "blocked"
+    if any(status != MILESTONE_STATUS_VALUES["not_started"] for status in statuses):
         return "in_progress"
     return "not_started"
 
 
-def row_to_phase_item(row: sqlite3.Row) -> dict:
+def milestone_progress(subtypes: list[dict]) -> int:
+    if not subtypes:
+        return 0
+    complete_count = sum(1 for subtype in subtypes if subtype["status"] in TERMINAL_MILESTONE_STATUSES)
+    return round((complete_count / len(subtypes)) * 100)
+
+
+def row_to_milestone_subtype(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "phaseId": row["phase_id"],
         "projectId": row["project_id"],
         "title": row["title"],
-        "completed": bool(row["completed"]),
+        "owner": row["owner"],
+        "status": row["status"] or MILESTONE_STATUS_VALUES["not_started"],
+        "link": row["link"] or "",
+        "comments": row["comments"] or "",
         "sortOrder": row["sort_order"],
         "createdAt": row["created_at"],
     }
 
 
 def row_to_phase(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
-    items = [
-        row_to_phase_item(item)
-        for item in connection.execute(
-            "SELECT * FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
+    subtypes = [
+        row_to_milestone_subtype(subtype)
+        for subtype in connection.execute(
+            "SELECT * FROM milestone_subtypes WHERE phase_id = ? ORDER BY sort_order, id",
             (row["id"],),
         )
     ]
-    done_count = sum(1 for item in items if item["completed"])
+    complete_count = sum(1 for subtype in subtypes if subtype["status"] in TERMINAL_MILESTONE_STATUSES)
     return {
         "id": row["id"],
         "projectId": row["project_id"],
-        "name": row["name"],
-        "milestone": row["milestone"],
+        "name": row["title"],
         "sortOrder": row["sort_order"],
-        "status": phase_status(items),
-        "progress": round((done_count / len(items)) * 100) if items else 0,
-        "completedCount": done_count,
-        "totalCount": len(items),
-        "items": items,
+        "status": milestone_phase_status(subtypes),
+        "progress": milestone_progress(subtypes),
+        "completedCount": complete_count,
+        "totalCount": len(subtypes),
+        "subtypes": subtypes,
         "createdAt": row["created_at"],
     }
 
@@ -1506,11 +1481,10 @@ def list_decisions(connection: sqlite3.Connection, project_id: int | None = None
 
 def list_phases(connection: sqlite3.Connection, project_id: int | None = None) -> list[dict]:
     if project_id is None:
-        rows = connection.execute("SELECT * FROM project_phases ORDER BY project_id, sort_order, id")
+        rows = connection.execute("SELECT * FROM milestone_phases ORDER BY project_id, sort_order, id")
     else:
-        ensure_default_phases(connection, project_id)
         rows = connection.execute(
-            "SELECT * FROM project_phases WHERE project_id = ? ORDER BY sort_order, id",
+            "SELECT * FROM milestone_phases WHERE project_id = ? ORDER BY sort_order, id",
             (project_id,),
         )
     return [row_to_phase(connection, row) for row in rows]
@@ -1572,8 +1546,19 @@ def replace_project_members_from_roles(connection: sqlite3.Connection, project_i
             """,
             (project_id, *members),
         )
+        connection.execute(
+            f"""
+            UPDATE milestone_subtypes
+            SET owner = NULL
+            WHERE project_id = ?
+              AND owner IS NOT NULL
+              AND owner NOT IN ({placeholders})
+            """,
+            (project_id, *members),
+        )
     else:
         connection.execute("UPDATE actions SET owner = NULL WHERE project_id = ?", (project_id,))
+        connection.execute("UPDATE milestone_subtypes SET owner = NULL WHERE project_id = ?", (project_id,))
 
 
 def update_project_details(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
@@ -1604,206 +1589,135 @@ def next_sort_order(connection: sqlite3.Connection, table: str, where_column: st
     return int(row["next_order"])
 
 
-def create_phase(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
-    require_project(connection, project_id)
-    name = normalize_name(payload.get("name"))
-    if not name:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase name is required.")
-    milestone = normalize_name(payload.get("milestone")) or f"{name} complete"
-    sort_order = next_sort_order(connection, "project_phases", "project_id", project_id)
-    cursor = connection.execute(
-        """
-        INSERT INTO project_phases (project_id, name, milestone, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (project_id, name, milestone, sort_order, now_iso()),
-    )
-    phase_id = cursor.lastrowid
-    raw_items = payload.get("items") or []
-    if isinstance(raw_items, str):
-        raw_items = [item.strip() for item in raw_items.splitlines()]
-    for item_index, item in enumerate(raw_items):
-        title = normalize_name(item.get("title") if isinstance(item, dict) else item)
+def parse_milestone_template(template_text: object) -> list[dict]:
+    lines = str(template_text or "").splitlines()
+    phases: list[dict] = []
+    current_phase: dict | None = None
+    saw_content = False
+    for line_number, raw_line in enumerate(lines, start=1):
+        if not str(raw_line).strip():
+            continue
+        saw_content = True
+        leading_whitespace = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        title = normalize_name(raw_line.strip())
         if not title:
             continue
-        connection.execute(
-            """
-            INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
-            VALUES (?, ?, ?, 0, ?, ?)
-            """,
-            (phase_id, project_id, title, item_index, now_iso()),
-        )
-    created = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    return row_to_phase(connection, created)
+        if not leading_whitespace:
+            current_phase = {"title": title, "subtypes": []}
+            phases.append(current_phase)
+            continue
+        if current_phase is None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"Template line {line_number} must start with a phase title.")
+        if any(character not in {" ", "\t"} for character in leading_whitespace):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"Template line {line_number} has unsupported indentation.")
+        if "\t" in leading_whitespace and " " in leading_whitespace:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Only one level of nesting is supported.")
+        if leading_whitespace == "\t":
+            pass
+        elif leading_whitespace == "    ":
+            pass
+        else:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Only one level of nesting is supported.")
+        current_phase["subtypes"].append({"title": title})
+
+    if not saw_content:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Template file is empty.")
+    if not phases:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Template must include at least one milestone phase.")
+    for phase in phases:
+        if not phase["subtypes"]:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{phase['title']} must include at least one subtype.")
+    return phases
 
 
-def update_phase(connection: sqlite3.Connection, phase_id: int, payload: dict) -> dict:
-    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
-    name = normalize_name(payload.get("name")) if "name" in payload else existing["name"]
-    if not name:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase name is required.")
-    milestone = normalize_name(payload.get("milestone")) if "milestone" in payload else existing["milestone"]
-    connection.execute(
-        "UPDATE project_phases SET name = ?, milestone = ? WHERE id = ?",
-        (name, milestone or f"{name} complete", phase_id),
-    )
-    updated = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    return row_to_phase(connection, updated)
-
-
-def move_phase(connection: sqlite3.Connection, phase_id: int, direction: str) -> dict:
-    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
-    if direction not in {"up", "down"}:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Phase direction must be up or down.")
-
-    comparator = "<" if direction == "up" else ">"
-    order_direction = "DESC" if direction == "up" else "ASC"
-    neighbor = connection.execute(
-        f"""
-        SELECT * FROM project_phases
-        WHERE project_id = ? AND sort_order {comparator} ?
-        ORDER BY sort_order {order_direction}, id {order_direction}
-        LIMIT 1
-        """,
-        (existing["project_id"], existing["sort_order"]),
+def project_has_milestones(connection: sqlite3.Connection, project_id: int) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM milestone_phases WHERE project_id = ? LIMIT 1",
+        (project_id,),
     ).fetchone()
-    if not neighbor:
-        return row_to_phase(connection, existing)
-
-    connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (neighbor["sort_order"], existing["id"]))
-    connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (existing["sort_order"], neighbor["id"]))
-    updated = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    return row_to_phase(connection, updated)
+    return row is not None
 
 
-def reorder_phases(connection: sqlite3.Connection, project_id: int, payload: dict) -> list[dict]:
+def import_milestone_template(connection: sqlite3.Connection, project_id: int, payload: dict) -> list[dict]:
     require_project(connection, project_id)
-    raw_ids = payload.get("ids") if isinstance(payload, dict) else []
-    ordered_ids = [int(value) for value in raw_ids or []]
-    existing_ids = [
-        row["id"]
-        for row in connection.execute(
-            "SELECT id FROM project_phases WHERE project_id = ? ORDER BY sort_order, id",
-            (project_id,),
+    phases = parse_milestone_template(payload.get("templateText") or payload.get("template"))
+    replace_existing = project_has_milestones(connection, project_id)
+    confirmed = bool(payload.get("confirmReplacement"))
+    if replace_existing and not confirmed:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Import confirmation is required before replacing existing milestones.")
+
+    connection.execute("DELETE FROM milestone_phases WHERE project_id = ?", (project_id,))
+    timestamp = now_iso()
+    for phase_index, phase in enumerate(phases):
+        cursor = connection.execute(
+            """
+            INSERT INTO milestone_phases (project_id, title, sort_order, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (project_id, phase["title"], phase_index, timestamp),
         )
-    ]
-    existing_set = set(existing_ids)
-    ordered_ids = [phase_id for phase_id in ordered_ids if phase_id in existing_set]
-    ordered_ids.extend(phase_id for phase_id in existing_ids if phase_id not in ordered_ids)
-    for sort_order, phase_id in enumerate(ordered_ids):
-        connection.execute("UPDATE project_phases SET sort_order = ? WHERE id = ?", (sort_order, phase_id))
+        phase_id = cursor.lastrowid
+        for subtype_index, subtype in enumerate(phase["subtypes"]):
+            connection.execute(
+                """
+                INSERT INTO milestone_subtypes (
+                  phase_id, project_id, title, owner, status, link, comments, sort_order, created_at
+                )
+                VALUES (?, ?, ?, NULL, ?, '', '', ?, ?)
+                """,
+                (
+                    phase_id,
+                    project_id,
+                    subtype["title"],
+                    MILESTONE_STATUS_VALUES["not_started"],
+                    subtype_index,
+                    timestamp,
+                ),
+            )
     return list_phases(connection, project_id)
 
 
-def delete_phase(connection: sqlite3.Connection, phase_id: int) -> dict:
-    existing = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
+def validate_milestone_owner(project: dict, owner: object) -> str | None:
+    normalized_owner = normalize_name(owner)
+    if not normalized_owner:
+        return None
+    matched_owner = match_project_member(normalized_owner, project.get("members") or [])
+    if not matched_owner:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Milestone owner must be a member of the selected project.")
+    return matched_owner
+
+
+def update_milestone_subtype(connection: sqlite3.Connection, subtype_id: int, payload: dict) -> dict:
+    existing = connection.execute("SELECT * FROM milestone_subtypes WHERE id = ?", (subtype_id,)).fetchone()
     if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
-    deleted_phase = row_to_phase(connection, existing)
-    connection.execute("DELETE FROM project_phases WHERE id = ?", (phase_id,))
-    return {"deletedPhase": deleted_phase}
+        raise ApiError(HTTPStatus.NOT_FOUND, "Milestone subtype not found.")
 
-
-def create_phase_item(connection: sqlite3.Connection, phase_id: int, payload: dict) -> dict:
-    phase = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    if not phase:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
-    title = normalize_name(payload.get("title"))
-    if not title:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype title is required.")
-    sort_order = next_sort_order(connection, "phase_items", "phase_id", phase_id)
-    cursor = connection.execute(
-        """
-        INSERT INTO phase_items (phase_id, project_id, title, completed, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (phase_id, phase["project_id"], title, 1 if payload.get("completed") else 0, sort_order, now_iso()),
-    )
-    created = connection.execute("SELECT * FROM phase_items WHERE id = ?", (cursor.lastrowid,)).fetchone()
-    return row_to_phase_item(created)
-
-
-def update_phase_item(connection: sqlite3.Connection, item_id: int, payload: dict) -> dict:
-    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
-    if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
+    project = row_to_project(connection, require_project(connection, existing["project_id"]))
     title = normalize_name(payload.get("title")) if "title" in payload else existing["title"]
     if not title:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype title is required.")
-    completed = 1 if payload.get("completed", bool(existing["completed"])) else 0
+
+    owner = existing["owner"]
+    if "owner" in payload:
+        owner = validate_milestone_owner(project, payload.get("owner"))
+
+    status = payload.get("status", existing["status"])
+    status = MILESTONE_STATUS_VALUES.get(normalized_match_text(status).replace(" ", "_"), status)
+    if status not in MILESTONE_STATUS_VALUES.values():
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Milestone status is invalid.")
+
+    link = normalize_name(payload.get("link")) if "link" in payload else (existing["link"] or "")
+    comments = str(payload.get("comments")).strip() if "comments" in payload else (existing["comments"] or "")
     connection.execute(
-        "UPDATE phase_items SET title = ?, completed = ? WHERE id = ?",
-        (title, completed, item_id),
-    )
-    updated = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
-    return row_to_phase_item(updated)
-
-
-def move_phase_item(connection: sqlite3.Connection, item_id: int, direction: str) -> dict:
-    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
-    if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
-    if direction not in {"up", "down"}:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Subtype direction must be up or down.")
-
-    comparator = "<" if direction == "up" else ">"
-    order_direction = "DESC" if direction == "up" else "ASC"
-    neighbor = connection.execute(
-        f"""
-        SELECT * FROM phase_items
-        WHERE phase_id = ? AND sort_order {comparator} ?
-        ORDER BY sort_order {order_direction}, id {order_direction}
-        LIMIT 1
+        """
+        UPDATE milestone_subtypes
+        SET title = ?, owner = ?, status = ?, link = ?, comments = ?
+        WHERE id = ?
         """,
-        (existing["phase_id"], existing["sort_order"]),
-    ).fetchone()
-    if not neighbor:
-        return row_to_phase_item(existing)
-
-    connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (neighbor["sort_order"], existing["id"]))
-    connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (existing["sort_order"], neighbor["id"]))
-    updated = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
-    return row_to_phase_item(updated)
-
-
-def reorder_phase_items(connection: sqlite3.Connection, phase_id: int, payload: dict) -> list[dict]:
-    phase = connection.execute("SELECT * FROM project_phases WHERE id = ?", (phase_id,)).fetchone()
-    if not phase:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Phase not found.")
-    raw_ids = payload.get("ids") if isinstance(payload, dict) else []
-    ordered_ids = [int(value) for value in raw_ids or []]
-    existing_ids = [
-        row["id"]
-        for row in connection.execute(
-            "SELECT id FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
-            (phase_id,),
-        )
-    ]
-    existing_set = set(existing_ids)
-    ordered_ids = [item_id for item_id in ordered_ids if item_id in existing_set]
-    ordered_ids.extend(item_id for item_id in existing_ids if item_id not in ordered_ids)
-    for sort_order, item_id in enumerate(ordered_ids):
-        connection.execute("UPDATE phase_items SET sort_order = ? WHERE id = ?", (sort_order, item_id))
-    return [
-        row_to_phase_item(row)
-        for row in connection.execute(
-            "SELECT * FROM phase_items WHERE phase_id = ? ORDER BY sort_order, id",
-            (phase_id,),
-        )
-    ]
-
-
-def delete_phase_item(connection: sqlite3.Connection, item_id: int) -> dict:
-    existing = connection.execute("SELECT * FROM phase_items WHERE id = ?", (item_id,)).fetchone()
-    if not existing:
-        raise ApiError(HTTPStatus.NOT_FOUND, "Subtype not found.")
-    deleted_item = row_to_phase_item(existing)
-    connection.execute("DELETE FROM phase_items WHERE id = ?", (item_id,))
-    return {"deletedPhaseItem": deleted_item}
+        (title, owner, status, link, comments, subtype_id),
+    )
+    updated = connection.execute("SELECT * FROM milestone_subtypes WHERE id = ?", (subtype_id,)).fetchone()
+    return row_to_milestone_subtype(updated)
 
 
 def create_project_link(connection: sqlite3.Connection, project_id: int, payload: dict) -> dict:
@@ -1959,8 +1873,6 @@ def create_project(connection: sqlite3.Connection, payload: dict) -> dict:
     project_id = cursor.lastrowid
 
     replace_project_members_from_roles(connection, project_id, role_details)
-
-    ensure_default_phases(connection, project_id)
     return row_to_project(connection, require_project(connection, project_id))
 
 
@@ -2014,8 +1926,19 @@ def replace_project_members(connection: sqlite3.Connection, project_id: int, pay
             """,
             (project_id, *members),
         )
+        connection.execute(
+            f"""
+            UPDATE milestone_subtypes
+            SET owner = NULL
+            WHERE project_id = ?
+              AND owner IS NOT NULL
+              AND owner NOT IN ({placeholders})
+            """,
+            (project_id, *members),
+        )
     else:
         connection.execute("UPDATE actions SET owner = NULL WHERE project_id = ?", (project_id,))
+        connection.execute("UPDATE milestone_subtypes SET owner = NULL WHERE project_id = ?", (project_id,))
 
     return row_to_project(connection, require_project(connection, project_id))
 
@@ -3551,16 +3474,26 @@ def project_memory_items(updates: list[dict], actions: list[dict], decisions: li
             "type": "action",
         })
     for phase in phases:
-        item_titles = [
-            f"{item.get('title')} [{'done' if item.get('completed') else 'open'}]"
-            for item in phase.get("items", [])
+        subtype_titles = [
+            " | ".join(
+                part
+                for part in [
+                    subtype.get("title"),
+                    subtype.get("status"),
+                    subtype.get("owner"),
+                    subtype.get("link"),
+                    subtype.get("comments"),
+                ]
+                if part
+            )
+            for subtype in phase.get("subtypes", [])
         ]
         items.append({
             "label": "Milestone",
             "date": phase.get("createdAt"),
             "text": compact_summary_text(
-                f"{phase.get('name')}: {phase.get('milestone')} ({phase.get('progress')}% complete). "
-                f"Items: {'; '.join(item_titles)}",
+                f"{phase.get('name')} ({phase.get('progress')}% complete, {phase.get('status')}). "
+                f"Subtypes: {'; '.join(subtype_titles)}",
                 700,
             ),
             "type": "milestone",
@@ -4630,38 +4563,14 @@ class ProjectPulseHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "projects" and parts[2] == "phases" and method == "GET":
                 return {"phases": list_phases(connection, int(parts[1]))}
 
-            if len(parts) == 3 and parts[0] == "projects" and parts[2] == "phases" and method == "POST":
-                return {"phase": create_phase(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
-
-            if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["phases", "reorder"] and method == "POST":
-                return {"phases": reorder_phases(connection, int(parts[1]), self.read_json())}
+            if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["phases", "import"] and method == "POST":
+                return {"phases": import_milestone_template(connection, int(parts[1]), self.read_json())}
 
             if len(parts) == 3 and parts[0] == "projects" and parts[2] == "links" and method == "POST":
                 return {"projectLink": create_project_link(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
 
-            if len(parts) == 2 and parts[0] == "phases" and method == "PATCH":
-                return {"phase": update_phase(connection, int(parts[1]), self.read_json())}
-
-            if len(parts) == 3 and parts[0] == "phases" and parts[2] in {"up", "down"} and method == "POST":
-                return {"phase": move_phase(connection, int(parts[1]), parts[2])}
-
-            if len(parts) == 2 and parts[0] == "phases" and method == "DELETE":
-                return delete_phase(connection, int(parts[1]))
-
-            if len(parts) == 3 and parts[0] == "phases" and parts[2] == "items" and method == "POST":
-                return {"phaseItem": create_phase_item(connection, int(parts[1]), self.read_json()), "_status": HTTPStatus.CREATED}
-
-            if len(parts) == 4 and parts[0] == "phases" and parts[2:] == ["items", "reorder"] and method == "POST":
-                return {"phaseItems": reorder_phase_items(connection, int(parts[1]), self.read_json())}
-
-            if len(parts) == 2 and parts[0] == "phase-items" and method == "PATCH":
-                return {"phaseItem": update_phase_item(connection, int(parts[1]), self.read_json())}
-
-            if len(parts) == 3 and parts[0] == "phase-items" and parts[2] in {"up", "down"} and method == "POST":
-                return {"phaseItem": move_phase_item(connection, int(parts[1]), parts[2])}
-
-            if len(parts) == 2 and parts[0] == "phase-items" and method == "DELETE":
-                return delete_phase_item(connection, int(parts[1]))
+            if len(parts) == 2 and parts[0] == "milestone-subtypes" and method == "PATCH":
+                return {"subtype": update_milestone_subtype(connection, int(parts[1]), self.read_json())}
 
             if len(parts) == 2 and parts[0] == "project-links" and method == "PATCH":
                 return {"projectLink": update_project_link(connection, int(parts[1]), self.read_json())}

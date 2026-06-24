@@ -146,12 +146,25 @@ PYTHON_CMD="$(find_python)"
 require_command npm
 
 if port_in_use "$API_PORT"; then
-  echo "Port $API_PORT is already in use. Stop the existing API first, or set PROJECT_PULSE_API_PORT." >&2
-  exit 1
+  echo "Port $API_PORT is in use. Killing existing process..."
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:${API_PORT}" | xargs -r kill -9
+    sleep 1
+  else
+    echo "Cannot free port $API_PORT because lsof is not available." >&2
+    exit 1
+  fi
 fi
 
 if port_in_use "$FRONTEND_PORT"; then
-  echo "Port $FRONTEND_PORT is already in use. Stop the existing frontend first, or set PROJECT_PULSE_FRONTEND_PORT." >&2
+  echo "Port $FRONTEND_PORT is already in use. Killing existing process..."
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:${FRONTEND_PORT}" | xargs -r kill -9
+    sleep 1
+  else
+    echo "Cannot free port $FRONTEND_PORT because lsof is not available." >&2
+    exit 1
+  fi
   exit 1
 fi
 

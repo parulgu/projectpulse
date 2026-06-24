@@ -1,0 +1,54 @@
+Discovery
+	Problem Statement
+	Resources Identified
+	Dependencies Identified
+	Scope
+	Estimates
+	Risks
+
+Requirements
+	Functional Requirements
+	Non Functional requirements - PSR
+	Non Functional requirements - Accessibility
+	Non Functional requirements - Globalization
+	Non Functional requirements - Product Model for testing
+    Commitment from other Dev teams
+    Stories creation
+
+Design 
+	Architecture Review
+	API design Review
+	Design Documented
+
+Development
+    Code Changes Review
+	Repository Changes Review
+	Security Review
+	Unit testing
+	PSR Unit Testing
+	BOM Updates
+	Translations
+	
+Q2 Testing
+	Q2 Testing (patches)
+	Q2 Testing (repo)
+	Q2 Testing (code+repo)
+	QA Automation
+	Regression Testing
+	Accessibility Testing
+	Q3 Testing
+	PSR Testing
+
+Delivery
+	Schema Checkin
+	Code Checkin
+	Repository Checkin
+	Seed Checkin
+	Translations Checkin
+
+Delivery
+	Documentation
+	User Acceptance (techpubs)
+	TOI
+	PO Meeting Demo
+	FAR

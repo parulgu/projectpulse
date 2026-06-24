@@ -1290,6 +1290,12 @@ textarea:focus-visible {
   justify-content: flex-end;
 }
 
+.file-upload-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
 .overview-section-heading h2,
 .phase-detail-heading h3 {
   font-size: 16px;
@@ -1456,6 +1462,16 @@ textarea:focus-visible {
 .milestone-progress-panel span {
   color: var(--ink);
   font-size: 14px;
+}
+
+.milestone-empty-state {
+  background: #f5f9fb;
+  border: 1px dashed #bfd0d8;
+  border-radius: 8px;
+  color: var(--muted);
+  display: grid;
+  gap: 6px;
+  padding: 14px;
 }
 
 .progress-ring {
@@ -1637,6 +1653,129 @@ textarea:focus-visible {
 .phase-item-row span {
   color: #203039;
   font-size: 13px;
+}
+
+.milestone-subtype-row {
+  cursor: default;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(240px, 1.4fr);
+  padding: 10px;
+}
+
+.milestone-chip-field {
+  align-items: center;
+  background: #f7fafb;
+  border: 1px solid #dfe7eb;
+  border-radius: 999px;
+  display: flex;
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.milestone-chip-field-title {
+  background: #eef4ff;
+  border-color: #cad6f5;
+}
+
+.milestone-chip-field.status.not-started {
+  background: #f7fafb;
+  border-color: #dfe7eb;
+}
+
+.milestone-chip-field.status.in-progress {
+  background: #e9f5fb;
+  border-color: #c9e1f0;
+}
+
+.milestone-chip-field.status.blocked {
+  background: #fff1ee;
+  border-color: #efcdc6;
+}
+
+.milestone-chip-field.status.complete {
+  background: #eaf7ee;
+  border-color: #cce4d2;
+}
+
+.milestone-chip-field.status.not-applicable {
+  background: #f4f1fb;
+  border-color: #ddd5ef;
+}
+
+.milestone-chip-input,
+.milestone-chip-select,
+.milestone-comments-input {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  min-height: 36px;
+  min-width: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.milestone-chip-input,
+.milestone-chip-select {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.milestone-chip-input {
+  color: #25415d;
+}
+
+.milestone-chip-select {
+  appearance: none;
+  color: #33444d;
+  padding-right: 16px;
+}
+
+.milestone-chip-select.owner {
+  color: #274e79;
+}
+
+.milestone-chip-select.status.not-started {
+  color: #5c6b73;
+}
+
+.milestone-chip-select.status.in-progress {
+  color: #286877;
+}
+
+.milestone-chip-select.status.blocked {
+  color: #96382f;
+}
+
+.milestone-chip-select.status.complete {
+  color: #2f6d44;
+}
+
+.milestone-chip-select.status.not-applicable {
+  color: #635485;
+}
+
+.milestone-comments-input {
+  border: 1px solid #dfe7eb;
+  border-radius: 10px;
+  font-size: 13px;
+  min-height: 38px;
+  padding: 8px 12px;
+}
+
+.milestone-comments-input::placeholder {
+  color: #8a98a0;
+}
+
+.phase-detail-heading.compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.phase-detail-heading.compact p {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  margin: 0;
 }
 
 .phase-item-row > input[type="checkbox"] {
@@ -4218,6 +4357,10 @@ textarea,
   .overview-top-grid,
   .milestone-progress-panel,
   .phase-edit-form {
+    grid-template-columns: 1fr;
+  }
+
+  .milestone-subtype-row {
     grid-template-columns: 1fr;
   }
 

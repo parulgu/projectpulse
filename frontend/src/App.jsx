@@ -16,6 +16,14 @@ const decisionStatuses = [
   { label: "Reversed", value: "reversed" },
 ];
 
+const milestoneStatusOptions = [
+  { label: "Not Started", value: "Not Started", tone: "not-started" },
+  { label: "In Progress", value: "In Progress", tone: "in-progress" },
+  { label: "Blocked", value: "Blocked", tone: "blocked" },
+  { label: "Complete", value: "Complete", tone: "complete" },
+  { label: "Not Applicable", value: "Not Applicable", tone: "not-applicable" },
+];
+
 const dashboardTabs = [
   { id: "overview", label: "Overview" },
   { id: "status", label: "Action Board" },
@@ -231,6 +239,25 @@ function timestampForSort(value) {
 
 function actionStatusLabel(value) {
   return actionStatuses.find((status) => status.value === value)?.label ?? labelForClassification(value || "active");
+}
+
+function milestoneStatusTone(value) {
+  return milestoneStatusOptions.find((status) => status.value === value)?.tone ?? "not-started";
+}
+
+function milestonePhaseStatus(subtypes = []) {
+  if (!subtypes.length) return "not_started";
+  const statuses = subtypes.map((subtype) => subtype.status);
+  if (statuses.every((status) => ["Complete", "Not Applicable"].includes(status))) return "done";
+  if (statuses.includes("Blocked")) return "blocked";
+  if (statuses.some((status) => status !== "Not Started")) return "in_progress";
+  return "not_started";
+}
+
+function milestonePhaseProgress(subtypes = []) {
+  if (!subtypes.length) return 0;
+  const completedCount = subtypes.filter((subtype) => ["Complete", "Not Applicable"].includes(subtype.status)).length;
+  return Math.round((completedCount / subtypes.length) * 100);
 }
 
 function projectMemoryItems({ actions = [], decisions = [], updates = [] }) {
@@ -1227,18 +1254,10 @@ function ProjectSummary({
 function ProjectOverview({
   actions,
   decisions,
-  onCreatePhase,
-  onCreatePhaseItem,
   onCreateProjectLink,
-  onDeletePhase,
-  onDeletePhaseItem,
   onDeleteProjectLink,
-  onMovePhase,
-  onMovePhaseItem,
-  onReorderPhaseItems,
-  onReorderPhases,
-  onUpdatePhase,
-  onUpdatePhaseItem,
+  onImportMilestones,
+  onUpdateMilestoneSubtype,
   onUpdateProjectDetails,
   onUpdateProjectLink,
   phases,
@@ -1253,38 +1272,26 @@ function ProjectOverview({
   const [isAddingRole, setIsAddingRole] = useState(false);
   const [newRoleName, setNewRoleName] = useState("");
   const [newRolePeople, setNewRolePeople] = useState("");
-  const [editingPhaseId, setEditingPhaseId] = useState(null);
-  const [phaseName, setPhaseName] = useState("");
-  const [phaseMilestone, setPhaseMilestone] = useState("");
-  const [isPhaseDialogOpen, setIsPhaseDialogOpen] = useState(false);
-  const [newPhaseName, setNewPhaseName] = useState("");
-  const [newPhaseItems, setNewPhaseItems] = useState("");
-  const [isItemDialogOpen, setIsItemDialogOpen] = useState(false);
-  const [newItemPhaseId, setNewItemPhaseId] = useState("");
-  const [editingItemId, setEditingItemId] = useState(null);
-  const [itemTitle, setItemTitle] = useState("");
-  const [newItemTitle, setNewItemTitle] = useState("");
   const [editingLinkId, setEditingLinkId] = useState(null);
   const [isAddingLink, setIsAddingLink] = useState(false);
   const [linkName, setLinkName] = useState("");
   const [linkAddress, setLinkAddress] = useState("");
   const [linkText, setLinkText] = useState("");
-  const [draggedPhaseId, setDraggedPhaseId] = useState(null);
-  const [dragOverPhaseId, setDragOverPhaseId] = useState(null);
-  const [draggedItemId, setDraggedItemId] = useState(null);
-  const [dragOverItemId, setDragOverItemId] = useState(null);
+  const [subtypeDrafts, setSubtypeDrafts] = useState({});
+  const [pendingTemplateImport, setPendingTemplateImport] = useState(null);
+  const [isImportingTemplate, setIsImportingTemplate] = useState(false);
   const [overviewError, setOverviewError] = useState("");
 
   const expandedPhase = expandedPhaseId === null ? null : phases.find((phase) => phase.id === expandedPhaseId) ?? phases[0] ?? null;
   const completePhaseCount = phases.filter((phase) => phase.status === "done").length;
-  const totalSubtypeCount = phases.reduce((total, phase) => total + phase.items.length, 0);
+  const totalSubtypeCount = phases.reduce((total, phase) => total + (phase.subtypes?.length ?? 0), 0);
   const completeSubtypeCount = phases.reduce(
-    (total, phase) => total + phase.items.filter((item) => item.completed).length,
+    (total, phase) => total + (phase.subtypes ?? []).filter((subtype) => ["Complete", "Not Applicable"].includes(subtype.status)).length,
     0,
   );
   const overallProgress = totalSubtypeCount ? Math.round((completeSubtypeCount / totalSubtypeCount) * 100) : 0;
   const nextPhase = phases.find((phase) => phase.status !== "done") ?? null;
-  const nextSubtype = nextPhase?.items.find((item) => !item.completed) ?? null;
+  const nextSubtype = nextPhase?.subtypes?.find((subtype) => !["Complete", "Not Applicable"].includes(subtype.status)) ?? null;
   const projectRoleDetailsKey = JSON.stringify(project.roleDetails ?? {});
 
   useEffect(() => {
@@ -1295,19 +1302,13 @@ function ProjectOverview({
     setIsAddingRole(false);
     setNewRoleName("");
     setNewRolePeople("");
-    setEditingPhaseId(null);
-    setEditingItemId(null);
     setEditingLinkId(null);
     setIsAddingLink(false);
     setLinkName("");
     setLinkAddress("");
     setLinkText("");
-    setIsPhaseDialogOpen(false);
-    setIsItemDialogOpen(false);
-    setDraggedPhaseId(null);
-    setDragOverPhaseId(null);
-    setDraggedItemId(null);
-    setDragOverItemId(null);
+    setSubtypeDrafts({});
+    setPendingTemplateImport(null);
     setOverviewError("");
   }, [project.id]);
 
@@ -1375,62 +1376,6 @@ function ProjectOverview({
     setOverviewError("");
   }
 
-  async function handleAddPhase(event) {
-    event.preventDefault();
-    if (!newPhaseName.trim()) return;
-    try {
-      const phase = await onCreatePhase(project.id, {
-        items: newPhaseItems.split("\n").map(normalizeName).filter(Boolean),
-        name: newPhaseName,
-      });
-      setExpandedPhaseId(phase.id);
-      setIsPhaseTrackerCollapsed(false);
-      setIsPhaseDialogOpen(false);
-      setNewPhaseName("");
-      setNewPhaseItems("");
-    } catch (error) {
-      setOverviewError(error instanceof Error ? error.message : "Could not add phase.");
-    }
-  }
-
-  async function handlePhaseEdit(event) {
-    event.preventDefault();
-    if (!editingPhaseId || !phaseName.trim()) return;
-    try {
-      await onUpdatePhase(editingPhaseId, { milestone: phaseMilestone, name: phaseName });
-      setEditingPhaseId(null);
-    } catch (error) {
-      setOverviewError(error instanceof Error ? error.message : "Could not update phase.");
-    }
-  }
-
-  async function handleAddItem(event) {
-    event.preventDefault();
-    const targetPhaseId = Number(newItemPhaseId || expandedPhase?.id || phases[0]?.id || 0);
-    if (!targetPhaseId || !newItemTitle.trim()) return;
-    try {
-      await onCreatePhaseItem(targetPhaseId, { title: newItemTitle });
-      setExpandedPhaseId(targetPhaseId);
-      setIsPhaseTrackerCollapsed(false);
-      setNewItemTitle("");
-      setNewItemPhaseId("");
-      setIsItemDialogOpen(false);
-    } catch (error) {
-      setOverviewError(error instanceof Error ? error.message : "Could not add subtype.");
-    }
-  }
-
-  async function handleItemEdit(event) {
-    event.preventDefault();
-    if (!editingItemId || !itemTitle.trim()) return;
-    try {
-      await onUpdatePhaseItem(editingItemId, { title: itemTitle });
-      setEditingItemId(null);
-    } catch (error) {
-      setOverviewError(error instanceof Error ? error.message : "Could not update subtype.");
-    }
-  }
-
   async function handleAddLink(event) {
     event.preventDefault();
     if (!linkName.trim() || !linkAddress.trim() || !linkText.trim()) return;
@@ -1451,17 +1396,6 @@ function ProjectOverview({
     } catch (error) {
       setOverviewError(error instanceof Error ? error.message : "Could not update useful link.");
     }
-  }
-
-  function beginPhaseEdit(phase) {
-    setEditingPhaseId(phase.id);
-    setPhaseName(phase.name);
-    setPhaseMilestone(phase.milestone);
-  }
-
-  function beginItemEdit(item) {
-    setEditingItemId(item.id);
-    setItemTitle(item.title);
   }
 
   function beginLinkEdit(link) {
@@ -1486,6 +1420,72 @@ function ProjectOverview({
     setLinkName("");
     setLinkAddress("");
     setLinkText("");
+  }
+
+  function subtypeDraft(subtype) {
+    return {
+      comments: subtype.comments ?? "",
+      link: subtype.link ?? "",
+      owner: subtype.owner ?? "",
+      status: subtype.status ?? "Not Started",
+      title: subtype.title ?? "",
+      ...(subtypeDrafts[subtype.id] ?? {}),
+    };
+  }
+
+  function updateSubtypeDraft(subtype, field, value) {
+    setSubtypeDrafts((currentDrafts) => ({
+      ...currentDrafts,
+      [subtype.id]: {
+        ...subtypeDraft(subtype),
+        [field]: value,
+      },
+    }));
+  }
+
+  async function saveSubtype(subtype, nextDraft = subtypeDraft(subtype)) {
+    try {
+      setOverviewError("");
+      await onUpdateMilestoneSubtype(subtype.id, nextDraft);
+      setSubtypeDrafts((currentDrafts) => {
+        const nextDrafts = { ...currentDrafts };
+        delete nextDrafts[subtype.id];
+        return nextDrafts;
+      });
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not update milestone subtype.");
+    }
+  }
+
+  async function importTemplate(templateText, confirmReplacement = false) {
+    try {
+      setOverviewError("");
+      setIsImportingTemplate(true);
+      const importedPhases = await onImportMilestones(project.id, { confirmReplacement, templateText });
+      setExpandedPhaseId(importedPhases[0]?.id ?? null);
+      setIsPhaseTrackerCollapsed(false);
+      setPendingTemplateImport(null);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not import milestone template.");
+    } finally {
+      setIsImportingTemplate(false);
+    }
+  }
+
+  async function handleTemplateFileSelected(event) {
+    const [file] = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const templateText = await file.text();
+      if (phases.length > 0) {
+        setPendingTemplateImport({ fileName: file.name || "template", templateText });
+        return;
+      }
+      await importTemplate(templateText, false);
+    } catch (error) {
+      setOverviewError(error instanceof Error ? error.message : "Could not read the selected template file.");
+    }
   }
 
   return (
@@ -1717,6 +1717,11 @@ function ProjectOverview({
             <p>{completePhaseCount} of {phases.length} phases complete · {overallProgress}% progress</p>
           </div>
           <div className="milestone-header-actions">
+            <label className="primary-action compact file-upload-button">
+              <input accept=".txt,text/plain" className="visually-hidden" onChange={handleTemplateFileSelected} type="file" />
+              <UploadIcon />
+              Import template
+            </label>
             <button
               className="secondary-action compact"
               onClick={() => {
@@ -1733,19 +1738,6 @@ function ProjectOverview({
             >
               {isPhaseTrackerCollapsed ? "Show phases" : "Collapse phases"}
             </button>
-            <button className="secondary-action compact" onClick={() => setIsPhaseDialogOpen(true)} type="button">
-              <PlusIcon /> Phase
-            </button>
-            <button
-              className="primary-action compact"
-              onClick={() => {
-                setNewItemPhaseId(String(expandedPhase?.id ?? phases[0]?.id ?? ""));
-                setIsItemDialogOpen(true);
-              }}
-              type="button"
-            >
-              <PlusIcon /> Item
-            </button>
           </div>
         </div>
 
@@ -1755,11 +1747,11 @@ function ProjectOverview({
           </div>
           <div>
             <strong>Project progress</strong>
-            <span>{completeSubtypeCount} of {totalSubtypeCount} checklist items complete</span>
+            <span>{completeSubtypeCount} of {totalSubtypeCount} milestone subtypes complete</span>
           </div>
           <div>
             <strong>Next</strong>
-            <span>{nextSubtype ? `${nextPhase.name}: ${nextSubtype.title}` : "All milestone items are complete"}</span>
+            <span>{nextSubtype ? `${nextPhase.name}: ${nextSubtype.title}` : "All milestone work is complete"}</span>
           </div>
           <div>
             <strong>Phases</strong>
@@ -1767,37 +1759,18 @@ function ProjectOverview({
           </div>
         </div>
 
-        {!isPhaseTrackerCollapsed ? (
+        {!phases.length ? (
+          <div className="milestone-empty-state">
+            <strong>No milestone template imported yet.</strong>
+            <span>Upload a plain text milestone template to generate the project milestone plan.</span>
+          </div>
+        ) : null}
+
+        {!isPhaseTrackerCollapsed && phases.length ? (
           <>
             <div className="phase-strip" aria-label="Project phases">
               {phases.map((phase, index) => (
-                <div
-                  className={`phase-step-shell ${expandedPhase?.id === phase.id ? "active" : ""} ${draggedPhaseId === phase.id ? "dragging" : ""} ${dragOverPhaseId === phase.id && draggedPhaseId !== phase.id ? "drop-target" : ""}`}
-                  draggable
-                  key={phase.id}
-                  onDragEnd={() => {
-                    setDraggedPhaseId(null);
-                    setDragOverPhaseId(null);
-                  }}
-                  onDragEnter={() => {
-                    if (draggedPhaseId && draggedPhaseId !== phase.id) setDragOverPhaseId(phase.id);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    if (draggedPhaseId && draggedPhaseId !== phase.id) setDragOverPhaseId(phase.id);
-                  }}
-                  onDragStart={(event) => {
-                    setDraggedPhaseId(phase.id);
-                    event.dataTransfer.effectAllowed = "move";
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (!draggedPhaseId || draggedPhaseId === phase.id) return;
-                    onReorderPhases(project.id, reorderedIds(phases, draggedPhaseId, phase.id));
-                    setDraggedPhaseId(null);
-                    setDragOverPhaseId(null);
-                  }}
-                >
+                <div className={`phase-step-shell ${expandedPhase?.id === phase.id ? "active" : ""}`} key={phase.id}>
                   <button
                     aria-expanded={expandedPhase?.id === phase.id}
                     className={`phase-step ${phase.status} ${expandedPhase?.id === phase.id ? "active" : ""}`}
@@ -1815,102 +1788,79 @@ function ProjectOverview({
 
             {expandedPhase ? (
               <div className="phase-detail">
-            {editingPhaseId === expandedPhase.id ? (
-              <form className="phase-title-edit" onSubmit={handlePhaseEdit}>
-                <input onChange={(event) => setPhaseName(event.target.value)} value={phaseName} />
-                <input onChange={(event) => setPhaseMilestone(event.target.value)} value={phaseMilestone} />
-                <button aria-label="Save phase" className="icon-action-button confirm" title="Save" type="submit"><CheckIcon /></button>
-                <button aria-label="Cancel phase edit" className="icon-action-button" onClick={() => setEditingPhaseId(null)} title="Cancel" type="button"><XIcon /></button>
-              </form>
-            ) : (
-              <div className="phase-detail-heading">
-                <div>
-                  <h3>{expandedPhase.name}</h3>
-                  <p>{expandedPhase.milestone}</p>
+                <div className="phase-detail-heading compact">
+                  <p>{expandedPhase.completedCount} of {expandedPhase.totalCount} subtypes complete</p>
                 </div>
-                <div className="row-actions visible">
-                  <button aria-label="Edit phase" className="icon-action-button" onClick={() => beginPhaseEdit(expandedPhase)} type="button"><EditIcon /></button>
-                  <button
-                    aria-label="Delete phase"
-                    className="icon-action-button danger"
-                    onClick={() => {
-                      if (window.confirm(`Delete ${expandedPhase.name}?`)) onDeletePhase(expandedPhase);
-                    }}
-                    type="button"
-                  >
-                    <TrashIcon />
-                  </button>
-                </div>
-              </div>
-            )}
 
-            <div className="phase-items table">
-              <div className="phase-items-head">
-                <span>Item</span>
-                <span>Actions</span>
-              </div>
-              {expandedPhase.items.map((item) => (
-                <div
-                  className={`phase-item-row ${draggedItemId === item.id ? "dragging" : ""} ${dragOverItemId === item.id && draggedItemId !== item.id ? "drop-target" : ""}`}
-                  draggable
-                  key={item.id}
-                  onDragEnd={() => {
-                    setDraggedItemId(null);
-                    setDragOverItemId(null);
-                  }}
-                  onDragEnter={() => {
-                    if (draggedItemId && draggedItemId !== item.id) setDragOverItemId(item.id);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    if (draggedItemId && draggedItemId !== item.id) setDragOverItemId(item.id);
-                  }}
-                  onDragStart={(event) => {
-                    setDraggedItemId(item.id);
-                    event.dataTransfer.effectAllowed = "move";
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (!draggedItemId || draggedItemId === item.id) return;
-                    onReorderPhaseItems(expandedPhase.id, reorderedIds(expandedPhase.items, draggedItemId, item.id));
-                    setDraggedItemId(null);
-                    setDragOverItemId(null);
-                  }}
-                >
-                  <input
-                    aria-label={`Mark ${item.title} complete`}
-                    checked={item.completed}
-                    onChange={(event) => onUpdatePhaseItem(item.id, { completed: event.target.checked })}
-                    type="checkbox"
-                  />
-                  {editingItemId === item.id ? (
-                    <form className="phase-item-edit" onSubmit={handleItemEdit}>
-                      <input onChange={(event) => setItemTitle(event.target.value)} value={itemTitle} />
-                      <button aria-label="Save subtype" className="icon-action-button confirm" title="Save" type="submit"><CheckIcon /></button>
-                      <button aria-label="Cancel subtype edit" className="icon-action-button" onClick={() => setEditingItemId(null)} title="Cancel" type="button"><XIcon /></button>
-                    </form>
-                  ) : (
-                    <>
-                      <span className={item.completed ? "complete" : ""}>{item.title}</span>
-                      <div className="row-actions">
-                        <button aria-label="Edit subtype" className="icon-action-button" onClick={() => beginItemEdit(item)} type="button"><EditIcon /></button>
-                        <button
-                          aria-label="Delete subtype"
-                          className="icon-action-button danger"
-                          onClick={() => {
-                            if (window.confirm(`Delete ${item.title}?`)) onDeletePhaseItem(item);
+                <div className="phase-items table milestone-subtypes-table">
+                  {expandedPhase.subtypes.map((subtype) => (
+                    <div className="phase-item-row milestone-subtype-row" key={subtype.id}>
+                      <label className="milestone-chip-field milestone-chip-field-title">
+                        <span className="visually-hidden">Subtype title</span>
+                        <input
+                          aria-label="Subtype title"
+                          className="milestone-chip-input"
+                          onBlur={() => saveSubtype(subtype)}
+                          onChange={(event) => updateSubtypeDraft(subtype, "title", event.target.value)}
+                          value={subtypeDraft(subtype).title}
+                        />
+                      </label>
+                      <label className="milestone-chip-field">
+                        <span className="visually-hidden">Subtype owner</span>
+                        <select
+                          aria-label="Subtype owner"
+                          className="milestone-chip-select owner"
+                          onChange={(event) => {
+                            const nextDraft = {
+                              ...subtypeDraft(subtype),
+                              owner: event.target.value,
+                            };
+                            updateSubtypeDraft(subtype, "owner", event.target.value);
+                            saveSubtype(subtype, nextDraft);
                           }}
-                          type="button"
+                          value={subtypeDraft(subtype).owner}
                         >
-                          <TrashIcon />
-                        </button>
-                      </div>
-                    </>
-                  )}
+                          <option value="">Owner: Unassigned</option>
+                          {project.members.map((member) => (
+                            <option key={member} value={member}>
+                              {`Owner: ${member}`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className={`milestone-chip-field status ${milestoneStatusTone(subtypeDraft(subtype).status)}`}>
+                        <span className="visually-hidden">Subtype status</span>
+                        <select
+                          aria-label="Subtype status"
+                          className={`milestone-chip-select status ${milestoneStatusTone(subtypeDraft(subtype).status)}`}
+                          onChange={(event) => {
+                            const nextDraft = {
+                              ...subtypeDraft(subtype),
+                              status: event.target.value,
+                            };
+                            updateSubtypeDraft(subtype, "status", event.target.value);
+                            saveSubtype(subtype, nextDraft);
+                          }}
+                          value={subtypeDraft(subtype).status}
+                        >
+                          {milestoneStatusOptions.map((status) => (
+                            <option key={status.value} value={status.value}>
+                              {`Status: ${status.label}`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <input
+                        aria-label="Subtype comments"
+                        className="milestone-comments-input"
+                        onBlur={() => saveSubtype(subtype)}
+                        onChange={(event) => updateSubtypeDraft(subtype, "comments", event.target.value)}
+                        placeholder="Notes or review comments"
+                        value={subtypeDraft(subtype).comments}
+                      />
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-
               </div>
             ) : null}
           </>
@@ -1919,106 +1869,35 @@ function ProjectOverview({
 
       <ProjectMemoryLane actions={actions} decisions={decisions} updates={updates} />
 
-      {isPhaseDialogOpen ? (
+      {pendingTemplateImport ? (
         <div className="modal-backdrop" role="presentation">
           <section
-            aria-labelledby="add-milestone-phase-title"
+            aria-labelledby="replace-milestone-template-title"
             aria-modal="true"
             className="confirmation-dialog milestone-item-dialog"
             role="dialog"
           >
             <div>
-              <p className="eyebrow">Milestone phase</p>
-              <h2 id="add-milestone-phase-title">Add phase</h2>
+              <p className="eyebrow">Replace milestones</p>
+              <h2 id="replace-milestone-template-title">Replace existing milestone plan?</h2>
             </div>
-            <form className="milestone-item-form" onSubmit={handleAddPhase}>
-              <label>
-                Phase name
-                <input
-                  autoFocus
-                  onChange={(event) => setNewPhaseName(event.target.value)}
-                  placeholder="Phase name"
-                  value={newPhaseName}
-                />
-              </label>
-              <label>
-                Subtypes
-                <textarea
-                  onChange={(event) => setNewPhaseItems(event.target.value)}
-                  placeholder="One subtype per line"
-                  value={newPhaseItems}
-                />
-              </label>
-              <div className="dialog-actions">
-                <button
-                  className="secondary-action"
-                  onClick={() => {
-                    setIsPhaseDialogOpen(false);
-                    setNewPhaseName("");
-                    setNewPhaseItems("");
-                  }}
-                  type="button"
-                >
-                  Cancel
-                </button>
-                <button className="primary-action" disabled={!newPhaseName.trim()} type="submit">
-                  Add phase
-                </button>
-              </div>
-            </form>
-          </section>
-        </div>
-      ) : null}
-
-      {isItemDialogOpen ? (
-        <div className="modal-backdrop" role="presentation">
-          <section
-            aria-labelledby="add-milestone-item-title"
-            aria-modal="true"
-            className="confirmation-dialog milestone-item-dialog"
-            role="dialog"
-          >
-            <div>
-              <p className="eyebrow">Milestone item</p>
-              <h2 id="add-milestone-item-title">Add subtype</h2>
+            <p>
+              Importing <strong>{pendingTemplateImport.fileName}</strong> will remove the current project milestone
+              structure and replace it with the uploaded template.
+            </p>
+            <div className="dialog-actions">
+              <button className="secondary-action" onClick={() => setPendingTemplateImport(null)} type="button">
+                Cancel
+              </button>
+              <button
+                className="danger-action solid"
+                disabled={isImportingTemplate}
+                onClick={() => importTemplate(pendingTemplateImport.templateText, true)}
+                type="button"
+              >
+                {isImportingTemplate ? "Importing..." : "Replace milestones"}
+              </button>
             </div>
-            <form className="milestone-item-form" onSubmit={handleAddItem}>
-              <label>
-                Phase
-                <select onChange={(event) => setNewItemPhaseId(event.target.value)} value={newItemPhaseId || String(expandedPhase?.id ?? phases[0]?.id ?? "")}>
-                  {phases.map((phase) => (
-                    <option key={phase.id} value={phase.id}>
-                      {phase.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Subtype
-                <input
-                  autoFocus
-                  onChange={(event) => setNewItemTitle(event.target.value)}
-                  placeholder="Subtype name"
-                  value={newItemTitle}
-                />
-              </label>
-              <div className="dialog-actions">
-                <button
-                  className="secondary-action"
-                  onClick={() => {
-                    setIsItemDialogOpen(false);
-                    setNewItemPhaseId("");
-                    setNewItemTitle("");
-                  }}
-                  type="button"
-                >
-                  Cancel
-                </button>
-                <button className="primary-action" disabled={!newItemTitle.trim()} type="submit">
-                  Add item
-                </button>
-              </div>
-            </form>
           </section>
         </div>
       ) : null}
@@ -5068,28 +4947,20 @@ function DashboardPanel({
   onCompletionDateChange,
   onConfirmExtractedActions,
   onDeleteDecision,
-  onDeletePhase,
-  onDeletePhaseItem,
   onDeleteProjectLink,
   onDeleteAction,
   onDeleteActions,
   onDeleteProjectNote,
   onExtractActions,
-  onMovePhase,
-  onMovePhaseItem,
-  onReorderPhaseItems,
-  onReorderPhases,
   onOwnerChange,
-  onCreatePhase,
-  onCreatePhaseItem,
+  onImportMilestones,
   onCreateProjectLink,
   onSaveDecision,
   onSaveProjectNote,
   onStatusChange,
   onTagChange,
   onTabChange,
-  onUpdatePhase,
-  onUpdatePhaseItem,
+  onUpdateMilestoneSubtype,
   onUpdateProjectDetails,
   onUpdateProjectLink,
   onUpdateDecision,
@@ -5103,18 +4974,10 @@ function DashboardPanel({
       <ProjectOverview
         actions={actions}
         decisions={decisions}
-        onCreatePhase={onCreatePhase}
-        onCreatePhaseItem={onCreatePhaseItem}
         onCreateProjectLink={onCreateProjectLink}
-        onDeletePhase={onDeletePhase}
-        onDeletePhaseItem={onDeletePhaseItem}
         onDeleteProjectLink={onDeleteProjectLink}
-        onMovePhase={onMovePhase}
-        onMovePhaseItem={onMovePhaseItem}
-        onReorderPhaseItems={onReorderPhaseItems}
-        onReorderPhases={onReorderPhases}
-        onUpdatePhase={onUpdatePhase}
-        onUpdatePhaseItem={onUpdatePhaseItem}
+        onImportMilestones={onImportMilestones}
+        onUpdateMilestoneSubtype={onUpdateMilestoneSubtype}
         onUpdateProjectDetails={onUpdateProjectDetails}
         onUpdateProjectLink={onUpdateProjectLink}
         phases={phases}
@@ -5185,8 +5048,7 @@ function DashboardShell({
   projectLinks = [],
   onActionTitleChange,
   onAddAction,
-  onCreatePhase,
-  onCreatePhaseItem,
+  onImportMilestones,
   onCreateProjectLink,
   onCreateBugQuery,
   onCleanDuplicates,
@@ -5197,15 +5059,9 @@ function DashboardShell({
   onDeleteAction,
   onDeleteActions,
   onDeleteDecision,
-  onDeletePhase,
-  onDeletePhaseItem,
   onDeleteProjectLink,
   onDeleteProjectNote,
   onExtractActions,
-  onMovePhase,
-  onMovePhaseItem,
-  onReorderPhaseItems,
-  onReorderPhases,
   onOwnerChange,
   onRefreshBugs,
   onUploadBugs,
@@ -5214,8 +5070,7 @@ function DashboardShell({
   onStatusChange,
   onTagChange,
   onTabChange,
-  onUpdatePhase,
-  onUpdatePhaseItem,
+  onUpdateMilestoneSubtype,
   onUpdateProjectDetails,
   onUpdateProjectLink,
   onUpdateBugQuery,
@@ -5614,32 +5469,24 @@ function DashboardShell({
           onActionTitleChange={onActionTitleChange}
           onAddAction={onAddAction}
           onCleanDuplicates={onCleanDuplicates}
-          onCreatePhase={onCreatePhase}
-          onCreatePhaseItem={onCreatePhaseItem}
+          onImportMilestones={onImportMilestones}
           onCreateProjectLink={onCreateProjectLink}
           onClearBugs={onClearBugs}
           onCompletionDateChange={onCompletionDateChange}
           onConfirmExtractedActions={onConfirmExtractedActions}
           onDeleteDecision={onDeleteDecision}
-          onDeletePhase={onDeletePhase}
-          onDeletePhaseItem={onDeletePhaseItem}
           onDeleteProjectLink={onDeleteProjectLink}
           onDeleteAction={onDeleteAction}
           onDeleteActions={onDeleteActions}
           onDeleteProjectNote={onDeleteProjectNote}
           onExtractActions={onExtractActions}
-          onMovePhase={onMovePhase}
-          onMovePhaseItem={onMovePhaseItem}
-          onReorderPhaseItems={onReorderPhaseItems}
-          onReorderPhases={onReorderPhases}
           onOwnerChange={onOwnerChange}
           onSaveDecision={onSaveDecision}
           onSaveProjectNote={onSaveProjectNote}
           onStatusChange={onStatusChange}
           onTagChange={onTagChange}
           onTabChange={onTabChange}
-          onUpdatePhase={onUpdatePhase}
-          onUpdatePhaseItem={onUpdatePhaseItem}
+          onUpdateMilestoneSubtype={onUpdateMilestoneSubtype}
           onUpdateProjectDetails={onUpdateProjectDetails}
           onUpdateProjectLink={onUpdateProjectLink}
           onUpdateDecision={onUpdateDecision}
@@ -6463,142 +6310,52 @@ function App() {
     }
   }
 
-  async function handleCreatePhase(projectId, payload) {
+  async function handleImportMilestones(projectId, payload) {
     try {
       setApiError("");
-      const { phase } = await apiRequest(`/projects/${projectId}/phases`, {
+      const { phases: importedPhases } = await apiRequest(`/projects/${projectId}/phases/import`, {
         body: JSON.stringify(payload),
         method: "POST",
       });
-      setPhases((currentPhases) => currentPhases.concat(phase));
-      showToast("Phase added");
-      return phase;
+      setPhases((currentPhases) => [
+        ...currentPhases.filter((phase) => phase.projectId !== projectId),
+        ...(importedPhases ?? []),
+      ]);
+      showToast("Milestone template imported");
+      return importedPhases ?? [];
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not add phase.");
+      setApiError(error instanceof Error ? error.message : "Could not import milestone template.");
       throw error;
     }
   }
 
-  async function handleUpdatePhase(phaseId, payload) {
+  async function handleUpdateMilestoneSubtype(subtypeId, payload) {
     try {
       setApiError("");
-      const { phase } = await apiRequest(`/phases/${phaseId}`, {
-        body: JSON.stringify(payload),
-        method: "PATCH",
-      });
-      setPhases((currentPhases) => currentPhases.map((currentPhase) => currentPhase.id === phase.id ? phase : currentPhase));
-      showToast("Phase updated");
-      return phase;
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not update phase.");
-      throw error;
-    }
-  }
-
-  async function handleDeletePhase(phaseToDelete) {
-    try {
-      setApiError("");
-      await apiRequest(`/phases/${phaseToDelete.id}`, { method: "DELETE" });
-      setPhases((currentPhases) => currentPhases.filter((phase) => phase.id !== phaseToDelete.id));
-      showToast("Phase deleted");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not delete phase.");
-      throw error;
-    }
-  }
-
-  async function handleMovePhase(phaseId, direction) {
-    try {
-      setApiError("");
-      await apiRequest(`/phases/${phaseId}/${direction}`, { method: "POST" });
-      await loadBootstrap(selectedProjectId);
-      showToast("Phase moved");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not move phase.");
-      throw error;
-    }
-  }
-
-  async function handleReorderPhases(projectId, orderedIds) {
-    try {
-      setApiError("");
-      await apiRequest(`/projects/${projectId}/phases/reorder`, {
-        body: JSON.stringify({ ids: orderedIds }),
-        method: "POST",
-      });
-      await loadBootstrap(selectedProjectId);
-      showToast("Phases reordered");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not reorder phases.");
-      throw error;
-    }
-  }
-
-  async function handleCreatePhaseItem(phaseId, payload) {
-    try {
-      setApiError("");
-      await apiRequest(`/phases/${phaseId}/items`, {
-        body: JSON.stringify(payload),
-        method: "POST",
-      });
-      await loadBootstrap(selectedProjectId);
-      showToast("Subtype added");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not add subtype.");
-      throw error;
-    }
-  }
-
-  async function handleUpdatePhaseItem(itemId, payload) {
-    try {
-      setApiError("");
-      await apiRequest(`/phase-items/${itemId}`, {
+      const { subtype } = await apiRequest(`/milestone-subtypes/${subtypeId}`, {
         body: JSON.stringify(payload),
         method: "PATCH",
       });
+      setPhases((currentPhases) => currentPhases.map((phase) => {
+        if (phase.id !== subtype.phaseId) return phase;
+        const nextSubtypes = (phase.subtypes ?? []).map((currentSubtype) => (
+          currentSubtype.id === subtype.id ? subtype : currentSubtype
+        ));
+        const completedCount = nextSubtypes.filter((item) => ["Complete", "Not Applicable"].includes(item.status)).length;
+        return {
+          ...phase,
+          completedCount,
+          progress: milestonePhaseProgress(nextSubtypes),
+          status: milestonePhaseStatus(nextSubtypes),
+          subtypes: nextSubtypes,
+          totalCount: nextSubtypes.length,
+        };
+      }));
       await loadBootstrap(selectedProjectId);
-      showToast(payload.completed === true ? "Subtype completed" : payload.completed === false ? "Subtype reopened" : "Subtype updated");
+      showToast("Milestone subtype updated");
+      return subtype;
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not update subtype.");
-      throw error;
-    }
-  }
-
-  async function handleDeletePhaseItem(itemToDelete) {
-    try {
-      setApiError("");
-      await apiRequest(`/phase-items/${itemToDelete.id}`, { method: "DELETE" });
-      await loadBootstrap(selectedProjectId);
-      showToast("Subtype deleted");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not delete subtype.");
-      throw error;
-    }
-  }
-
-  async function handleMovePhaseItem(itemId, direction) {
-    try {
-      setApiError("");
-      await apiRequest(`/phase-items/${itemId}/${direction}`, { method: "POST" });
-      await loadBootstrap(selectedProjectId);
-      showToast("Subtype moved");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not move subtype.");
-      throw error;
-    }
-  }
-
-  async function handleReorderPhaseItems(phaseId, orderedIds) {
-    try {
-      setApiError("");
-      await apiRequest(`/phases/${phaseId}/items/reorder`, {
-        body: JSON.stringify({ ids: orderedIds }),
-        method: "POST",
-      });
-      await loadBootstrap(selectedProjectId);
-      showToast("Subtypes reordered");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not reorder subtypes.");
+      setApiError(error instanceof Error ? error.message : "Could not update milestone subtype.");
       throw error;
     }
   }
@@ -6719,8 +6476,7 @@ function App() {
               projectLinks={selectedProjectLinks}
               onActionTitleChange={handleActionTitleChange}
               onAddAction={handleAddAction}
-              onCreatePhase={handleCreatePhase}
-              onCreatePhaseItem={handleCreatePhaseItem}
+              onImportMilestones={handleImportMilestones}
               onCreateProjectLink={handleCreateProjectLink}
               onCreateBugQuery={handleCreateBugQuery}
               onCleanDuplicates={handleCleanDuplicates}
@@ -6731,15 +6487,9 @@ function App() {
               onDeleteAction={setActionPendingDelete}
               onDeleteActions={setActionsPendingDelete}
               onDeleteDecision={handleDeleteDecision}
-              onDeletePhase={handleDeletePhase}
-              onDeletePhaseItem={handleDeletePhaseItem}
               onDeleteProjectLink={handleDeleteProjectLink}
               onDeleteProjectNote={setNotePendingDelete}
               onExtractActions={handleExtractActions}
-              onMovePhase={handleMovePhase}
-              onMovePhaseItem={handleMovePhaseItem}
-              onReorderPhaseItems={handleReorderPhaseItems}
-              onReorderPhases={handleReorderPhases}
               onOwnerChange={handleOwnerChange}
               onRefreshBugs={handleRefreshBugs}
               onUploadBugs={handleUploadBugs}
@@ -6748,8 +6498,7 @@ function App() {
               onStatusChange={handleStatusChange}
               onTagChange={handleActionTagChange}
               onTabChange={setActiveTab}
-              onUpdatePhase={handleUpdatePhase}
-              onUpdatePhaseItem={handleUpdatePhaseItem}
+              onUpdateMilestoneSubtype={handleUpdateMilestoneSubtype}
               onUpdateProjectDetails={handleUpdateProjectDetails}
               onUpdateProjectLink={handleUpdateProjectLink}
               onUpdateBugQuery={handleUpdateBugQuery}

@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Project: Project Pulse
+
+  Tech Stack:
+  - React frontend
+  - Python backend
+  - CSS styling
+
+  Development Approach:
+  - OpenSpec driven development
+  - Architecture-first changes
+  - Small incremental features
+
+  Standards:
+  - Document behavior before implementation
+  - Keep API contracts explicit
+  - Prefer simple and maintainable solutions
+  - Avoid unnecessary dependencies
+
+rules:
+  proposal:
+    - Include problem statement
+    - Include goals
+    - Include non-goals
+    - Include success criteria
+
+  design:
+    - Explain architecture impact
+    - Explain frontend impact
+    - Explain backend impact
+    - Document API changes
+
+  tasks:
+    - Tasks must be independently testable
+    - Tasks should be implementation focused
+    - Include validation steps
+
+  spec:
+    - Describe behavior
+    - Avoid implementation details
+    - Use clear acceptance scenarios

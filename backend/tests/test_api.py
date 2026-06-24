@@ -105,7 +105,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(len(bootstrap["projects"]), 4)
         self.assertGreaterEqual(len(bootstrap["actions"]), 1)
         self.assertEqual(bootstrap["bugs"], [])
-        self.assertGreaterEqual(len(bootstrap["phases"]), 4)
+        self.assertEqual(bootstrap["phases"], [])
         self.assertIn("projectLinks", bootstrap)
 
     def test_followups_endpoint_returns_detected_items(self) -> None:
@@ -238,7 +238,7 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(restored["project"]["archivedAt"])
 
-    def test_project_overview_details_phases_and_links(self) -> None:
+    def test_project_overview_details_milestones_and_links(self) -> None:
         status, created = self.client.request(
             "POST",
             "/api/projects",
@@ -282,54 +282,75 @@ class ProjectPulseApiTest(unittest.TestCase):
 
         status, phases = self.client.request("GET", f"/api/projects/{project_id}/phases")
         self.assertEqual(status, 200)
-        self.assertEqual(phases["phases"][0]["name"], "Discovery")
+        self.assertEqual(phases["phases"], [])
 
-        first_item = phases["phases"][0]["items"][0]
-        status, updated_item = self.client.request(
+        status, imported = self.client.request(
+            "POST",
+            f"/api/projects/{project_id}/phases/import",
+            {"templateText": "Discovery\n    Problem Statement\n    Scope\nDelivery\n    Demo\n    FAR"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(imported["phases"][0]["name"], "Discovery")
+        self.assertEqual(imported["phases"][0]["subtypes"][0]["title"], "Problem Statement")
+        self.assertEqual(imported["phases"][0]["subtypes"][0]["status"], "Not Started")
+
+        first_subtype = imported["phases"][0]["subtypes"][0]
+        status, updated_subtype = self.client.request(
             "PATCH",
-            f"/api/phase-items/{first_item['id']}",
-            {"completed": True},
+            f"/api/milestone-subtypes/{first_subtype['id']}",
+            {
+                "comments": "Reviewed in weekly sync",
+                "link": "https://example.test/design",
+                "owner": "Asha",
+                "status": "Blocked",
+                "title": "Problem statement",
+            },
         )
         self.assertEqual(status, 200)
-        self.assertTrue(updated_item["phaseItem"]["completed"])
+        self.assertEqual(updated_subtype["subtype"]["owner"], "Asha")
+        self.assertEqual(updated_subtype["subtype"]["status"], "Blocked")
+        self.assertEqual(updated_subtype["subtype"]["comments"], "Reviewed in weekly sync")
 
-        status, phase = self.client.request(
+        status, rejected_owner = self.client.request(
+            "PATCH",
+            f"/api/milestone-subtypes/{first_subtype['id']}",
+            {"owner": "Someone Else"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected_owner["error"], "Milestone owner must be a member of the selected project.")
+
+        status, replace_requires_confirmation = self.client.request(
             "POST",
-            f"/api/projects/{project_id}/phases",
-            {"name": "Adoption", "milestone": "Adoption complete", "items": ["Enable users"]},
+            f"/api/projects/{project_id}/phases/import",
+            {"templateText": "Requirements\n    Stories"},
         )
-        self.assertEqual(status, 201)
-        self.assertEqual(phase["phase"]["items"][0]["title"], "Enable users")
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            replace_requires_confirmation["error"],
+            "Import confirmation is required before replacing existing milestones.",
+        )
 
-        status, moved_phase = self.client.request("POST", f"/api/phases/{phase['phase']['id']}/up")
-        self.assertEqual(status, 200)
-        self.assertLess(moved_phase["phase"]["sortOrder"], phase["phase"]["sortOrder"])
-
-        status, reordered_phases = self.client.request(
+        status, replaced = self.client.request(
             "POST",
-            f"/api/projects/{project_id}/phases/reorder",
-            {"ids": [phase["phase"]["id"], phases["phases"][0]["id"]]},
+            f"/api/projects/{project_id}/phases/import",
+            {"templateText": "Requirements\n    Stories", "confirmReplacement": True},
         )
         self.assertEqual(status, 200)
-        self.assertEqual(reordered_phases["phases"][0]["id"], phase["phase"]["id"])
+        self.assertEqual(len(replaced["phases"]), 1)
+        self.assertEqual(replaced["phases"][0]["name"], "Requirements")
+        self.assertEqual(replaced["phases"][0]["subtypes"][0]["title"], "Stories")
 
-        status, new_item = self.client.request(
+        status, invalid_nesting = self.client.request(
             "POST",
-            f"/api/phases/{phases['phases'][0]['id']}/items",
-            {"title": "Second discovery item"},
+            f"/api/projects/{project_id}/phases/import",
+            {"templateText": "Discovery\n    Problem Statement\n        Too deep", "confirmReplacement": True},
         )
-        self.assertEqual(status, 201)
-        status, moved_item = self.client.request("POST", f"/api/phase-items/{new_item['phaseItem']['id']}/up")
-        self.assertEqual(status, 200)
-        self.assertLess(moved_item["phaseItem"]["sortOrder"], new_item["phaseItem"]["sortOrder"])
+        self.assertEqual(status, 400)
+        self.assertEqual(invalid_nesting["error"], "Only one level of nesting is supported.")
 
-        status, reordered_items = self.client.request(
-            "POST",
-            f"/api/phases/{phases['phases'][0]['id']}/items/reorder",
-            {"ids": [first_item["id"], new_item["phaseItem"]["id"]]},
-        )
+        status, unchanged = self.client.request("GET", f"/api/projects/{project_id}/phases")
         self.assertEqual(status, 200)
-        self.assertEqual(reordered_items["phaseItems"][0]["id"], first_item["id"])
+        self.assertEqual(unchanged["phases"][0]["name"], "Requirements")
 
         status, link = self.client.request(
             "POST",
@@ -349,6 +370,16 @@ class ProjectPulseApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(updated_link["projectLink"]["address"], "https://example.test/EPIC-202")
         self.assertEqual(updated_link["projectLink"]["linkText"], "EPIC-202")
+
+    def test_milestone_import_accepts_tab_indentation(self) -> None:
+        status, payload = self.client.request(
+            "POST",
+            "/api/projects/1/phases/import",
+            {"templateText": "Discovery\n\tProblem Statement\n\tScope\nDelivery\n\tDemo"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["phases"][0]["name"], "Discovery")
+        self.assertEqual([subtype["title"] for subtype in payload["phases"][0]["subtypes"]], ["Problem Statement", "Scope"])
 
     def test_update_can_create_action_and_patch_status(self) -> None:
         status, payload = self.client.request(
